@@ -1,0 +1,9 @@
+# Runtime dependencies — install inside the NGC DeepStream container:
+#   docker exec -it <container> pip install -r requirements.txt
+#
+# pyds (DeepStream Python bindings) is NOT listed here — it is pre-installed
+# in nvcr.io/nvidia/deepstream:7.1-triton-multiarch and cannot be pip-installed.
+
+numpy>=1.23
+opencv-python>=4.7
+ultralytics>=8.0

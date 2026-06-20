@@ -1,0 +1,6 @@
+# Dev dependencies — needed for running tests and generating comparison reports.
+# Install in addition to requirements.txt.
+
+-r requirements.txt
+pytest>=8.0
+motmetrics>=1.4

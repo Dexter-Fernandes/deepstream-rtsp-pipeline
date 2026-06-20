@@ -1,0 +1,17 @@
+.git
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+models/engines/
+*.engine
+*.onnx
+*.pt
+*.pth
+data/MOT*/
+data/mot*/
+metrics/output*.csv
+plugins/*/build/
+.venv
+venv/
+.ruff_cache/

@@ -216,3 +216,30 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# DeepStream / TensorRT
+models/engines/
+*.engine
+*.onnx
+*.pt
+*.pth
+*.wts
+*.trt
+
+# MOT17 dataset — download via data/download.sh, do not commit
+data/*.mp4
+data/*.avi
+data/*.txt
+data/MOT*/
+data/mot*/
+
+# C++ plugin build output
+plugins/*/build/
+plugins/**/*.so
+
+# Runtime CSV output
+metrics/output*.csv
+metrics/*_tracker_*.csv
+
+# Jupyter checkpoints already covered above, but also notebook outputs
+metrics/*.nbconvert.ipynb
