@@ -243,3 +243,6 @@ metrics/*_tracker_*.csv
 
 # Jupyter checkpoints already covered above, but also notebook outputs
 metrics/*.nbconvert.ipynb
+
+# Session handoff docs
+handoff.md
