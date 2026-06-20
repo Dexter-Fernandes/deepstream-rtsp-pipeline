@@ -35,17 +35,12 @@ Hardware available: Acer Nitro 5, GTX 1660Ti (6GB VRAM, Turing, compute capabili
 ### Language
 Python + pyds bindings. The `plugins/` directory (C++ TensorRT decode plugin) seeds a future full C++ refactor branch.
 
-### Two-Path Source Design
+### Source Design
 
-**Path A — Laptop Webcam**
-- `v4l2src` → `nvvideoconvert` → `nvstreammux` → `nvinfer` → `nvtracker` → `nvosd`
-- Role: fast local prototyping, validates pipeline structure before adding RTSP complexity
-
-**Path B — RTSP (mediamtx)**
+**RTSP via mediamtx**
 - `rtspsrc` → `rtph264depay` → `nvv4l2decoder` → `nvstreammux` → `nvinfer` → `nvtracker` → `nvosd`
-- Role: matches VivaCity's actual sensor input method; used for multi-stream testing
-
-**Sequencing:** Path A first (days 1–3) to validate pipeline structure. Path B replaces only the source bin — same `nvinfer`/`nvtracker` config carries over.
+- MOT17 MP4s looped via mediamtx on localhost. Reproducible, loopable, no network variables.
+- Path A (webcam via `v4l2src`) removed — mediamtx is working and covers all use cases.
 
 ### RTSP Source Strategy
 `mediamtx` re-streams MOT17 clips on separate paths:
@@ -78,9 +73,9 @@ Anonymisation blur probe inserted between `nvosd` and display sink — detected 
 
 ```
 deepstream-rtsp-pipeline/
-├── docker/          # Dockerfile, docker-compose.yml, mediamtx config
+├── docker/          # Dockerfile, docker-compose.yml
 ├── models/          # convert.py (PyTorch→ONNX→TRT), .gitignore for engines/weights
-├── configs/         # nvinfer config, tracker configs (iou.yml, nvdcf.yml, bytetrack.yml)
+├── configs/         # nvinfer config, tracker configs (iou.yml, nvdcf.yml, bytetrack.yml), mediamtx.yml
 ├── pipelines/       # Python pipeline scripts (webcam.py, rtsp.py, multi_stream.py)
 ├── plugins/         # C++ TensorRT decode plugin (IPluginV2DynamicExt + CMakeLists.txt)
 ├── metrics/         # CSV sink, tracker comparison notebook, decode plugin comparison notebook
@@ -120,12 +115,12 @@ deepstream-rtsp-pipeline/
 
 ## 8. Success Metrics
 
-- Pipeline runs stably for 30+ min continuous on both Path A and Path B without crash/leak
+- Pipeline runs stably for 30+ min continuous on RTSP source without crash/leak
 - Custom YOLO model achieves 15+ FPS at FP16 on 1660Ti
 - Multi-stream test runs 3 concurrent sources (MOT17-04/13/02) without dropped frames beyond acceptable threshold
 - Tracker comparison report produced with full MOTA/HOTA/IDF1 suite on MOT17-04
 - Decode plugin comparison shows measurable latency improvement with `IProfiler` evidence
-- README documents architecture, privacy approach, known gaps (Jetson, INT8, DeepSORT) with explicit reasoning
+- README documents architecture, privacy approach, known gaps (Jetson, INT8, DeepSORT, webcam path) with explicit reasoning
 
 ## 9. Risks
 

@@ -25,6 +25,7 @@ Portfolio project targeting the VivaCity Edge AI (Computer Vision) Engineer role
 ### Language & Container
 - **Python + pyds** bindings for the pipeline. C++ refactor is a future parallel branch.
 - **NGC DeepStream container** (`nvcr.io/nvidia/deepstream:7.1-triton-multiarch`) via `nvidia-container-toolkit`. Chosen over bare-metal to avoid dependency hell and make the repo reproducible.
+- **Single source path: RTSP only.** Path A (webcam via `v4l2src`) removed — mediamtx is working and provides a reproducible, loopable source. Webcam path adds no value over RTSP for this portfolio project.
 
 ### RTSP Source
 - **mediamtx** re-streaming MOT17 clips on localhost. Chosen over real IP cameras (reproducible, scriptable, committable config).
@@ -84,10 +85,10 @@ Portfolio project targeting the VivaCity Edge AI (Computer Vision) Engineer role
 
 ```
 deepstream-rtsp-pipeline/
-├── docker/          # Dockerfile, docker-compose.yml, mediamtx config
+├── docker/          # Dockerfile, docker-compose.yml
 ├── models/          # convert.py, .gitignore for engines/ and weights
-├── configs/         # nvinfer config, tracker configs (iou, nvdcf, bytetrack)
-├── pipelines/       # webcam.py, rtsp.py, multi_stream.py
+├── configs/         # nvinfer config, tracker configs (iou, nvdcf, bytetrack), mediamtx.yml
+├── pipelines/       # rtsp.py, multi_stream.py
 ├── plugins/         # C++ TensorRT decode plugin (IPluginV2DynamicExt + CMakeLists.txt)
 ├── metrics/         # CSV sink, tracker_comparison.ipynb, decode_comparison.ipynb, evaluate_tracker.py
 ├── data/            # download.sh for MOT17 clips (clips not committed)

@@ -4,27 +4,23 @@
 
 ## M1 — Pipeline Plumbing
 
-**Exit criteria:** live bounding boxes rendering from both Path A (webcam) and Path B (RTSP/mediamtx) using stock detection model.
+**Exit criteria:** live bounding boxes rendering from RTSP source (mediamtx/MOT17) using stock detection model.
 
 ### M1.1 — Environment Setup
-- [ ] Pull NGC DeepStream container (`nvcr.io/nvidia/deepstream:7.1-triton-multiarch`)
-- [ ] Verify GPU passthrough: `docker run --gpus all nvcr.io/nvidia/deepstream nvidia-smi`
-- [ ] Install `mediamtx` on host; confirm it starts and serves an RTSP path
-- [ ] Download MOT17-04, MOT17-13, MOT17-02 sequences via `data/download.sh`
-- [ ] Configure mediamtx to serve all three sequences on `stream0/1/2`
-- [ ] Verify RTSP stream playable: `ffplay rtsp://localhost:8554/stream0`
+- [x] Pull NGC DeepStream container (`nvcr.io/nvidia/deepstream:7.1-triton-multiarch`)
+- [x] Verify GPU passthrough: `docker run --gpus all --rm nvcr.io/nvidia/deepstream:7.1-triton-multiarch nvidia-smi`
+- [x] Install `mediamtx` on host; confirm it starts and serves an RTSP path
+- [x] Convert MOT17-04, MOT17-13, MOT17-02 image sequences to MP4 via ffmpeg
+- [x] Configure mediamtx (`configs/mediamtx.yml`) to serve all three on `stream0/1/2`
+- [x] Verify RTSP streams playable: `ffplay rtsp://localhost:8554/stream0`
 
-### M1.2 — Path A (Webcam Pipeline)
-- [ ] Scaffold `pipelines/webcam.py` using pyds `deepstream-test1` as reference
-- [ ] Chain: `v4l2src → nvvideoconvert → nvstreammux → nvinfer → nvtracker → nvosd → autovideosink`
-- [ ] Use stock ResNet-10 traffic model from NGC as placeholder `nvinfer` config
-- [ ] Confirm pipeline launches without GST errors; bounding boxes visible
-
-### M1.3 — Path B (RTSP Pipeline)
-- [ ] Scaffold `pipelines/rtsp.py` — swap source bin only; keep rest of graph identical to Path A
+### M1.2 — RTSP Pipeline
+- [ ] Scaffold `pipelines/rtsp.py`
 - [ ] Chain: `rtspsrc → rtph264depay → nvv4l2decoder → nvstreammux → nvinfer → nvtracker → nvosd`
+- [ ] Use stock ResNet-10 traffic model from NGC as placeholder `nvinfer` config
 - [ ] Test against `rtsp://localhost:8554/stream0` (MOT17-04)
 - [ ] Add RTSP reconnect handling (`rtspsrc` `retry` and `timeout` properties)
+- [ ] Confirm pipeline launches without GST errors; bounding boxes visible
 
 ### M1.4 — CSV Metadata Sink
 - [ ] `pipelines/metadata_parser.py` — `Detection` dataclass + `parse_frame_meta()` (TDD, 6 tests passing)
@@ -110,7 +106,7 @@
 - [ ] Write `docs/isp-and-camera-input.md` — ISP pipeline stages (demosaicing, AWB, gamma, lens distortion), nvargus on Jetson, how ISP misconfiguration degrades model accuracy
 - [ ] Write `docs/system-design.md` — fleet-scale architecture: 1→5000 sensors, edge→cloud metadata path, sensor failure/reconnect, JetPack fleet upgrade strategy
 - [ ] Complete README: architecture diagram, quickstart, tracker comparison table summary, decode plugin results, known gaps with explicit reasoning, Privacy by Design section
-- [ ] Final 30-minute stability run on both Path A and Path B; confirm no crash/leak
+- [ ] Final 30-minute stability run on RTSP pipeline; confirm no crash/leak
 
 ---
 
