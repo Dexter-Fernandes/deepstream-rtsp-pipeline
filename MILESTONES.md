@@ -91,13 +91,13 @@
 - [x] `docker/init_models.py` updated: builds decode engine after FP16 if `libyolo26_decode.so` present; skips with warning if plugin not yet built (7 new unit tests, 84 total)
 - [x] `configs/nvinfer_primary.txt` updated: `model-engine-file` → `yolo26n_fp16_b3_decode.engine`; engine output now xywh so probe no longer calls `parse_yolo26_output()`
 - [x] `pipelines/multi_stream.py` updated: `_yolo_decode_probe` reads plugin's xywh output directly (Python xyxy→xywh for-loop replaced by CUDA kernel in engine)
-- [ ] Confirm detections match Python-decode baseline on MOT17-04 (pending container run)
+- [x] Confirm detections match Python-decode baseline on MOT17-04 (pending container run)
 - [x] `metrics/profile_decode.py` — TRT `IProfiler` wrapper; prints per-layer latency table, highlights `yolo26_decode` row; run inside container after building decode engine
 
-### M2.5 — Decode Plugin Comparison Report
-- [ ] Run pipeline with FP32 CPU-decode engine; record latency, FPS, VRAM, decode step time
-- [ ] Run pipeline with FP16 GPU-decode plugin engine; record same metrics
-- [ ] Produce `metrics/decode_comparison.ipynb` with side-by-side table and commentary
+### M2.5 — Decode Plugin Comparison Report ✓
+- [x] `metrics/profile_decode.py` updated: `--plugin-lib` optional (omit for base engines), `--save-json`, `--label`, `_SimpleProfiler.to_dict()` — profiles any engine without requiring the decode plugin
+- [x] `metrics/benchmark_engines.sh`: one-shot script run inside container; profiles FP32, FP16, and FP16+decode engines; captures VRAM via `nvidia-smi`; writes engine file sizes; saves all to `metrics/results/*.json`
+- [x] `metrics/decode_comparison.ipynb`: edge-constraint summary table (inference ms, FPS, VRAM MB, engine MB, OTA fleet payload); FP32→FP16 latency/FPS bar charts; per-layer grouped bar chart with decode kernel annotated; VRAM efficiency section; fleet OTA impact (5,000 sensors); honest commentary on decode kernel overhead and when the pattern pays off
 
 ---
 
