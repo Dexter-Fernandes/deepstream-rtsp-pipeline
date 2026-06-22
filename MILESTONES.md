@@ -50,12 +50,12 @@
 - [x] Confirm blurred output visible via `ffplay rtsp://localhost:8556/stream0_out`
 
 ### M1.8 — Multi-Stream Pipeline
-- [ ] Write `pipelines/multi_stream.py` — 3 concurrent `rtspsrc` bins into a single `nvstreammux` (batch-size=3)
-- [ ] Per-source CSV output keyed by `source_id` from `NvDsFrameMeta`
-- [ ] Per-source restream via `nvrtspoutsinkbin` (ports 8556/8557/8558 for stream0/1/2)
-- [ ] Replace three-container docker-compose with single `pipeline` service running `multi_stream.py`
-- [ ] Unit tests: multi-stream config defaults, source URI list parsing (TDD, CPU-safe)
-- [ ] Run all three streams concurrently; confirm all three CSVs populated and clean EOS
+- [x] Write `pipelines/multi_stream.py` — 3 concurrent `rtspsrc` bins into a single `nvstreammux` (batch-size=3)
+- [x] Per-source CSV output keyed by `source_id` from `NvDsFrameMeta`
+- [x] Per-source restream via `nvrtspoutsinkbin` (ports 8556/8557/8558 for stream0/1/2)
+- [x] Replace three-container docker-compose with single `pipeline` service running `multi_stream.py`
+- [x] Unit tests: multi-stream config defaults, source URI list parsing (TDD, CPU-safe, 8 tests)
+- [x] Run all three streams concurrently; confirm all three CSVs populated and clean EOS
 
 ---
 

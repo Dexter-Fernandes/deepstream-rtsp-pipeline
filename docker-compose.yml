@@ -20,26 +20,14 @@ x-pipeline: &pipeline-base
             capabilities: [gpu]
 
 services:
-  pipeline0:
+  pipeline:
     <<: *pipeline-base
-    command: ["python3", "pipelines/rtsp.py",
+    command: ["python3", "pipelines/multi_stream.py",
               "--uri", "rtsp://localhost:8554/stream0",
-              "--restream-uri", "rtsp://localhost:8556/stream0_out",
-              "--output", "/workspace/output_stream0.csv"]
-
-  pipeline1:
-    <<: *pipeline-base
-    command: ["python3", "pipelines/rtsp.py",
               "--uri", "rtsp://localhost:8554/stream1",
-              "--restream-uri", "rtsp://localhost:8557/stream1_out",
-              "--output", "/workspace/output_stream1.csv"]
-
-  pipeline2:
-    <<: *pipeline-base
-    command: ["python3", "pipelines/rtsp.py",
               "--uri", "rtsp://localhost:8554/stream2",
-              "--restream-uri", "rtsp://localhost:8558/stream2_out",
-              "--output", "/workspace/output_stream2.csv"]
+              "--restream-base-port", "8556",
+              "--output-dir", "/workspace"]
 
   # dashboard:
   #   build: .

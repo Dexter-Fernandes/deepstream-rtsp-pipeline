@@ -1,0 +1,364 @@
+import argparse
+import signal
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+@dataclass
+class MultiStreamConfig:
+    uris: list[str] = field(default_factory=list)
+    nvinfer_config: str = "configs/nvinfer_primary.txt"
+    retry: int = 3
+    timeout_us: int = 5_000_000
+    mux_width: int = 1920
+    mux_height: int = 1080
+    output_dir: str = "."
+    restream_base_port: int | None = None
+    anonymise: bool = False
+
+
+def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
+    parser = argparse.ArgumentParser(description="DeepStream multi-stream RTSP pipeline")
+    parser.add_argument("--uri", action="append", dest="uris", default=[], metavar="URI", help="RTSP source URI (repeat for multiple)")
+    parser.add_argument("--nvinfer-config", default="configs/nvinfer_primary.txt", dest="nvinfer_config")
+    parser.add_argument("--retry", type=int, default=3)
+    parser.add_argument("--output-dir", default=".", dest="output_dir", help="Directory for per-source CSV files")
+    parser.add_argument("--restream-base-port", type=int, default=None, dest="restream_base_port", help="Base port for nvrtspoutsinkbin (stream0=base, stream1=base+1, ...)")
+    parser.add_argument("--anonymise", action="store_true", dest="anonymise", help="Enable blur anonymisation")
+    args = parser.parse_args(argv)
+    return MultiStreamConfig(
+        uris=args.uris,
+        nvinfer_config=args.nvinfer_config,
+        retry=args.retry,
+        output_dir=args.output_dir,
+        restream_base_port=args.restream_base_port,
+        anonymise=args.anonymise,
+    )
+
+
+def _output_csv_path(output_dir: str, source_id: int) -> str:
+    return str(Path(output_dir) / f"output_stream{source_id}.csv")
+
+
+def _restream_port(base_port: int, source_id: int) -> int:
+    return base_port + source_id
+
+
+def _make_nvinfer_config(base_config: str, n: int) -> str:
+    """Return a nvinfer config path with batch-size set to n.
+
+    Writes a temp file so the TensorRT engine is built (or cached) for the
+    correct batch-size without modifying the original single-stream config.
+    """
+    if n == 1:
+        return base_config
+
+    import re
+
+    with open(base_config) as f:
+        content = f.read()
+
+    content = re.sub(r'batch-size\s*=\s*\d+', f'batch-size={n}', content)
+    # Rename the engine file path so nvinfer builds a fresh engine for this
+    # batch-size rather than trying to reuse the cached batch-1 engine.
+    content = re.sub(
+        r'(model-engine-file\s*=\s*.+?)_b\d+(_gpu\d+_\w+\.engine)',
+        rf'\g<1>_b{n}\g<2>',
+        content,
+    )
+
+    out_path = f'/tmp/nvinfer_b{n}.txt'
+    with open(out_path, 'w') as f:
+        f.write(content)
+    return out_path
+
+
+def _make_source_bin(pipeline, config: MultiStreamConfig, idx: int):
+    """Build rtspsrc→depay→decoder→queue for one source and return the queue element."""
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+
+    source = Gst.ElementFactory.make("rtspsrc", f"source_{idx}")
+    depay = Gst.ElementFactory.make("rtph264depay", f"depay_{idx}")
+    decoder = Gst.ElementFactory.make("nvv4l2decoder", f"decoder_{idx}")
+    queue = Gst.ElementFactory.make("queue", f"queue_{idx}")
+
+    for name, el in [
+        (f"rtspsrc_{idx}", source), (f"rtph264depay_{idx}", depay),
+        (f"nvv4l2decoder_{idx}", decoder), (f"queue_{idx}", queue),
+    ]:
+        if not el:
+            raise RuntimeError(f"Could not create GStreamer element: {name}")
+        pipeline.add(el)
+
+    source.set_property("location", config.uris[idx])
+    source.set_property("protocols", 4)
+    source.set_property("retry", config.retry)
+    source.set_property("timeout", config.timeout_us)
+
+    depay.link(decoder)
+    decoder.link(queue)
+
+    def _on_pad_added(src, new_pad, _depay=depay, _idx=idx):
+        sink_pad = _depay.get_static_pad("sink")
+        if sink_pad.is_linked():
+            return
+        ret = new_pad.link(sink_pad)
+        if ret not in (Gst.PadLinkReturn.OK, Gst.PadLinkReturn.WAS_LINKED):
+            print(f"[multi_stream] source {_idx} pad link returned {ret} — likely RTCP, ignoring", file=sys.stderr)
+
+    source.connect("pad-added", _on_pad_added)
+    return queue
+
+
+def build_pipeline(config: MultiStreamConfig):
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst, GLib  # noqa: F401
+
+    Gst.init(None)
+
+    if not config.uris:
+        raise ValueError("MultiStreamConfig.uris must contain at least one URI")
+
+    pipeline = Gst.Pipeline()
+    n = len(config.uris)
+
+    # ── Shared inference chain (operates on the full batch) ──────────────────
+    # nvstreammux collects one frame from each source into a batch of N before
+    # pushing downstream; nvinfer and nvtracker then operate on all N at once.
+    # Conversion + OSD are NOT here — a single nvdsosd on a batched buffer only
+    # draws on the first frame (source 0). They live per-branch after the demux.
+    mux = Gst.ElementFactory.make("nvstreammux", "mux")
+    nvinfer = Gst.ElementFactory.make("nvinfer", "nvinfer")
+    tracker = Gst.ElementFactory.make("nvtracker", "tracker")
+
+    # ── Demux: split batched stream back to per-source buffers ───────────────
+    demux = Gst.ElementFactory.make("nvstreamdemux", "demux")
+
+    for name, el in [
+        ("nvstreammux", mux), ("nvinfer", nvinfer), ("nvtracker", tracker),
+        ("nvstreamdemux", demux),
+    ]:
+        if not el:
+            raise RuntimeError(f"Could not create GStreamer element: {name}")
+        pipeline.add(el)
+
+    mux.set_property("width", config.mux_width)
+    mux.set_property("height", config.mux_height)
+    mux.set_property("batch-size", n)
+    mux.set_property("batched-push-timeout", 4_000_000)
+
+    nvinfer.set_property("config-file-path", _make_nvinfer_config(config.nvinfer_config, n))
+
+    tracker.set_property(
+        "ll-lib-file",
+        "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so",
+    )
+
+    # ── Source bins → mux ────────────────────────────────────────────────────
+    # Each bin is: rtspsrc → rtph264depay → nvv4l2decoder → queue
+    # The queue's src pad is linked to mux sink_{i} so all sources feed one mux.
+    for i in range(n):
+        queue = _make_source_bin(pipeline, config, i)
+        mux_sink = mux.request_pad_simple(f"sink_{i}")
+        queue_src = queue.get_static_pad("src")
+        queue_src.link(mux_sink)
+
+    # ── Shared chain: mux → inference → tracker → demux ──────────────────────
+    # Everything up to the demux runs on the batched buffer. Conversion + OSD
+    # are deliberately downstream of the demux (see below).
+    mux.link(nvinfer)
+    nvinfer.link(tracker)
+    tracker.link(demux)
+
+    # ── Per-source output branches ────────────────────────────────────────────
+    # Each branch replicates the proven single-stream tail:
+    #   demux.src_{i} → queue_out_{i} → nvvideoconvert_{i} → caps_rgba_{i}
+    #                 → nvdsosd_{i} → sink_{i}
+    # A per-branch nvdsosd is required: a single nvdsosd on the batched buffer
+    # only draws on source 0. nvvideoconvert uses CUDA unified memory so the
+    # optional anonymise probe can read/write the RGBA surface.
+    # Linking: pad-level for demux→queue (queue always has a static "sink" pad);
+    # element-level for the rest so GStreamer auto-negotiates the
+    # nvrtspoutsinkbin ghost pad name.
+    for i in range(n):
+        queue_out = Gst.ElementFactory.make("queue", f"queue_out_{i}")
+        converter = Gst.ElementFactory.make("nvvideoconvert", f"converter_{i}")
+        caps_rgba = Gst.ElementFactory.make("capsfilter", f"caps_rgba_{i}")
+        osd = Gst.ElementFactory.make("nvdsosd", f"osd_{i}")
+
+        for name, el in [
+            (f"queue_out_{i}", queue_out), (f"converter_{i}", converter),
+            (f"caps_rgba_{i}", caps_rgba), (f"osd_{i}", osd),
+        ]:
+            if not el:
+                raise RuntimeError(f"Could not create GStreamer element: {name}")
+            pipeline.add(el)
+
+        caps_rgba.set_property(
+            "caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=RGBA")
+        )
+        # nvbuf-mem-cuda-unified: required for pyds.get_nvds_buf_surface on dGPU
+        converter.set_property("nvbuf-memory-type", 3)
+
+        if config.restream_base_port is not None:
+            sink = Gst.ElementFactory.make("nvrtspoutsinkbin", f"sink_{i}")
+            if not sink:
+                raise RuntimeError(f"Could not create nvrtspoutsinkbin for source {i}")
+            pipeline.add(sink)
+            sink.set_property("rtsp-port", _restream_port(config.restream_base_port, i))
+            sink.set_property("rtsp-mount-point", f"/stream{i}_out")
+        else:
+            sink = Gst.ElementFactory.make("fakesink", f"sink_{i}")
+            if not sink:
+                raise RuntimeError(f"Could not create fakesink for source {i}")
+            pipeline.add(sink)
+
+        demux_src = demux.request_pad_simple(f"src_{i}")
+        demux_src.link(queue_out.get_static_pad("sink"))
+        queue_out.link(converter)
+        converter.link(caps_rgba)
+        caps_rgba.link(osd)
+        osd.link(sink)
+
+    return pipeline
+
+
+def _parse_frame_detections(frame_meta):
+    """Extract detections from a single NvDsFrameMeta (one source's frame)."""
+    import pyds
+    from pipelines.metadata_parser import Detection
+
+    detections = []
+    obj_list = frame_meta.obj_meta_list
+    while obj_list is not None:
+        try:
+            obj_meta = pyds.NvDsObjectMeta.cast(obj_list.data)
+        except StopIteration:
+            break
+        rect = obj_meta.rect_params
+        detections.append(Detection(
+            frame_num=frame_meta.frame_num,
+            object_id=obj_meta.object_id,
+            class_id=obj_meta.class_id,
+            class_label=obj_meta.obj_label,
+            confidence=obj_meta.confidence,
+            left=rect.left,
+            top=rect.top,
+            width=rect.width,
+            height=rect.height,
+        ))
+        try:
+            obj_list = obj_list.next
+        except StopIteration:
+            break
+    return detections
+
+
+def run(config: MultiStreamConfig) -> None:
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst, GLib
+    import pyds
+
+    import numpy as np
+    import cv2
+    from metrics.csv_sink import CsvSink
+    from pipelines.anonymisation import blur_bboxes
+
+    pipeline = build_pipeline(config)
+    loop = GLib.MainLoop()
+
+    csv_sinks = {
+        i: CsvSink(_output_csv_path(config.output_dir, i))
+        for i in range(len(config.uris))
+    }
+
+    # One probe per per-branch nvdsosd sink pad — fires before that branch's OSD
+    # draws. After the demux each buffer carries a single source's frame, so the
+    # surface batch-index is always 0; source_id from the frame meta still tells
+    # us which stream it is, so CSV routing is unchanged.
+    def _probe(pad, info, _user_data):
+        gst_buffer = info.get_buffer()
+        if gst_buffer is None:
+            return Gst.PadProbeReturn.OK
+        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
+        if batch_meta is None:
+            return Gst.PadProbeReturn.OK
+
+        # Single-source buffer post-demux, but walk the list defensively
+        frame_meta_list = batch_meta.frame_meta_list
+        while frame_meta_list is not None:
+            try:
+                frame_meta = pyds.NvDsFrameMeta.cast(frame_meta_list.data)
+            except StopIteration:
+                break
+
+            source_id = frame_meta.source_id
+            detections = _parse_frame_detections(frame_meta)
+
+            # Optional: blur bboxes in-place on the NVMM surface before OSD draws
+            if config.anonymise and detections:
+                surface = pyds.get_nvds_buf_surface(hash(gst_buffer), 0)
+                if surface is not None:
+                    frame_view = np.array(surface, copy=False)
+                    frame_bgr = cv2.cvtColor(frame_view[:, :, :3], cv2.COLOR_RGB2BGR)
+                    blurred_bgr = blur_bboxes(frame_bgr, detections)
+                    frame_view[:, :, :3] = cv2.cvtColor(blurred_bgr, cv2.COLOR_BGR2RGB)
+
+            # Write this frame's detections to its source's CSV
+            if source_id in csv_sinks:
+                csv_sinks[source_id].write(detections)
+
+            try:
+                frame_meta_list = frame_meta_list.next
+            except StopIteration:
+                break
+
+        return Gst.PadProbeReturn.OK
+
+    for i in range(len(config.uris)):
+        osd_sink_pad = pipeline.get_by_name(f"osd_{i}").get_static_pad("sink")
+        osd_sink_pad.add_probe(Gst.PadProbeType.BUFFER, _probe, 0)
+
+    bus = pipeline.get_bus()
+    bus.add_signal_watch()
+
+    def _on_message(_, msg):
+        t = msg.type
+        if t == Gst.MessageType.EOS:
+            print("EOS received — stopping pipeline")
+            loop.quit()
+        elif t == Gst.MessageType.ERROR:
+            err, debug = msg.parse_error()
+            print(f"Pipeline error: {err.message} ({debug})", file=sys.stderr)
+            loop.quit()
+
+    bus.connect("message", _on_message)
+
+    def _on_sigint(_sig, _frame):
+        print("\nInterrupted — stopping pipeline")
+        loop.quit()
+
+    signal.signal(signal.SIGINT, _on_sigint)
+    signal.signal(signal.SIGTERM, _on_sigint)
+
+    ret = pipeline.set_state(Gst.State.PLAYING)
+    if ret == Gst.StateChangeReturn.FAILURE:
+        raise RuntimeError("Failed to set pipeline to PLAYING")
+
+    uris_str = ", ".join(config.uris)
+    print(f"Pipeline running — sources: {uris_str}  output_dir: {config.output_dir}")
+    try:
+        loop.run()
+    finally:
+        pipeline.set_state(Gst.State.NULL)
+        for sink in csv_sinks.values():
+            sink.close()
+
+
+if __name__ == "__main__":
+    run(parse_args())
