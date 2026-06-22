@@ -61,25 +61,26 @@
 
 ## M2 — Custom Model + C++ Decode Plugin
 
-**Exit criteria:** YOLOv8n running through DeepStream at FP16 with stable ByteTrack IDs; C++ decode plugin built and benchmarked.
+**Exit criteria:** YOLO26n running through DeepStream at FP16 with stable ByteTrack IDs; C++ decode plugin built and benchmarked.
 
-### M2.1 — YOLOv8n Export
-- [ ] Install `ultralytics` in container
-- [ ] Export `yolov8n.pt` → ONNX (no NMS in graph): `model.export(format='onnx', nms=False)`
-- [ ] Write `models/convert.py`: ONNX → TensorRT FP32 baseline engine via `trtexec`
-- [ ] Add FP16 conversion path to `convert.py`: `--fp16` flag
-- [ ] Document INT8 exclusion in `convert.py` comments (no Tensor Cores on 1660Ti)
-- [ ] Confirm both engines load in TensorRT without error
+### M2.1 — YOLO26n Export ✓
+- [x] Install `ultralytics` in container (`docker/Dockerfile`)
+- [x] Export `yolo26n.pt` → ONNX (YOLO26 is NMS-free by default; no `nms=False` flag needed): `models/export_yolo26.py`
+- [x] Write `models/convert.py`: ONNX → TensorRT FP32 baseline engine via `trtexec`
+- [x] Add FP16 conversion path to `convert.py`: `--fp16` flag
+- [x] Document INT8 exclusion in `convert.py` comments (no Tensor Cores on 1660Ti)
+- [x] Container auto-init: `docker/init_models.py` — sequential export → FP32 → FP16 on first start, skip-if-exists on warm restart; wired via `ENTRYPOINT` in Dockerfile (21 new unit tests, 68 total)
+- [ ] Confirm both engines load in TensorRT without error (pending successful `trtexec` run)
 
 ### M2.2 — nvinfer Custom Output Parser
-- [ ] `models/output_parser.py` — `parse_yolov8_output()` anchor-free decode (TDD, 5 tests passing)
+- [ ] `models/output_parser.py` — `parse_yolo26_output()` anchor-free, DFL-free decode (TDD, 5 tests passing)
 - [ ] Wire parser into `nvinfer` config (`parse-bbox-func-name`, `custom-lib-path`)
 - [ ] Confirm detections appear correctly on MOT17-04 stream (visual check)
 
 ### M2.3 — C++ Decode Plugin (Part 1)
-- [ ] Scaffold `plugins/yolov8_decode/` with `CMakeLists.txt`
+- [ ] Scaffold `plugins/yolo26_decode/` with `CMakeLists.txt`
 - [ ] Implement `IPluginV2DynamicExt` skeleton: `getOutputDimensions`, `enqueue`, `serialize`
-- [ ] Implement CUDA kernel for sigmoid + anchor-free box coordinate transform in `enqueue`
+- [ ] Implement CUDA kernel for anchor-free box coordinate transform in `enqueue` (no sigmoid needed — YOLO26 head is DFL-free)
 - [ ] Build plugin `.so`: `cmake .. && make` inside container
 
 ### M2.4 — C++ Decode Plugin (Part 2)

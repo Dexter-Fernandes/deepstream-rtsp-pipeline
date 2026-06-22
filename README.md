@@ -5,7 +5,7 @@ NVIDIA DeepStream pipeline running three concurrent RTSP streams through GPU-acc
 ## What this demonstrates
 
 - **Multi-stream batching** — three RTSP sources muxed into a single `nvstreammux` (batch-size=3); per-source outputs demuxed back and rendered independently
-- **TDD discipline** — 46 CPU-safe unit tests written before implementation (vertical red→green slices); no GPU required for the test suite
+- **TDD discipline** — 68 CPU-safe unit tests written before implementation (vertical red→green slices); no GPU required for the test suite
 - **Privacy by design** — anonymisation blur probe wired before `nvdsosd`; detected bbox regions blurred on the NVMM surface before any output leaves the pipeline
 - **Benchmarking pipeline** — per-frame CSV metadata sink; mediamtx RTSP source with MOT17 sequences (MOT17-04 has ground truth for MOTA/HOTA/IDF1 evaluation in M3)
 - **Reproducible environment** — NGC DeepStream 9.0 container + pyds compiled from source; `docker compose up` reproduces the full pipeline
@@ -49,7 +49,7 @@ mediamtx configs/mediamtx.yml &
 # Build image (first run only — pyds compiled from source, ~5 min)
 docker compose build
 
-# Run pipeline (first run builds TRT batch-3 engine, ~60 s)
+# Run pipeline (first run: exports YOLO26n → ONNX → FP32/FP16 TRT engines, then starts)
 docker compose up
 
 # Verify output
@@ -65,17 +65,20 @@ ffplay rtsp://localhost:8558/stream2_out   # boxes on stream2
 
 ```bash
 pip install pytest
-pytest tests/unit/ -v      # 46 tests, CPU-only, no GPU required
+pytest tests/unit/ -v      # 68 tests, CPU-only, no GPU required
 ```
 
 | Module | Tests | What they cover |
 |--------|-------|-----------------|
 | `metadata_parser` | 6 | `Detection` dataclass, `parse_frame_meta` with fake pyds structs |
 | `csv_sink` | 6 | Header, field values, flush-on-write, multi-detection roundtrip |
-| `anonymisation` | 5 | Blur applied, pixels outside bbox unchanged, out-of-bounds clip |
+| `anonymisation` | 6 | Blur applied, pixels outside bbox unchanged, out-of-bounds clip |
 | `frame_accessor` | 4 | NVMM surface accessor with injectable `_get_surface` |
 | `rtsp_pipeline` | 14 | Config defaults, arg parsing, source props, restream URI parsing |
 | `multi_stream` | 11 | Multi-URI parsing, CSV path routing, port offset, `_make_nvinfer_config` batch-size + engine path rewrite |
+| `convert` | 11 | `engine_path` naming, `build_trtexec_cmd` flags, `parse_args` defaults |
+| `export_yolo26` | 3 | `parse_args` for weights path and output-dir |
+| `init_models` | 7 | Skip/run logic for all cold-start and warm-start combinations |
 
 GPU smoke tests (`pytest --gpu`) are planned for M3.4.
 
@@ -84,10 +87,10 @@ GPU smoke tests (`pytest --gpu`) are planned for M3.4.
 ## Roadmap
 
 **M1 — Pipeline Plumbing** ✓ *(complete)*
-Three-stream concurrent pipeline; TrafficCamNet ResNet-18 FP32 placeholder; per-source CSV; anonymisation probe; RTSP restream; 46 unit tests.
+Three-stream concurrent pipeline; TrafficCamNet ResNet-18 FP32 placeholder; per-source CSV; anonymisation probe; RTSP restream; 47 unit tests.
 
-**M2 — Custom Model + C++ Decode Plugin** *(in progress)*
-Export YOLOv8n → ONNX → TensorRT FP32/FP16; C++ `IPluginV2DynamicExt` GPU decode plugin replacing the CPU ONNX NMS path (`plugins/yolov8_decode/`); FP32 vs FP16+plugin latency comparison report.
+**M2 — Custom Model + C++ Decode Plugin** *(in progress — M2.1 complete)*
+YOLO26n export pipeline: `.pt → ONNX → TRT FP32/FP16` via `trtexec`; container auto-init (`docker/init_models.py`) runs export + conversion on first start and skips on warm restart; 21 new unit tests (68 total). Next: custom output parser (M2.2), C++ `IPluginV2DynamicExt` GPU decode plugin (`plugins/yolo26_decode/`), FP32 vs FP16+plugin latency comparison.
 
 **M3 — Tracker Comparison + Hardening** *(planned)*
 Three-way tracker comparison (IOU → NvDCF → ByteTrack) with MOTA/HOTA/IDF1 on MOT17-04 ground truth; 30-minute stability run; GPU smoke + integration tests; `docs/jetson-upgrade.md`, `docs/isp-and-camera-input.md`, `docs/system-design.md`.
