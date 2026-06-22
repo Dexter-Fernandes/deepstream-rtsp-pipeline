@@ -1,8 +1,16 @@
 import argparse
+import ctypes
 import signal
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+_PLUGIN_LIB = Path("/opt/ds_plugins/libyolo26_decode.so")
+if _PLUGIN_LIB.exists():
+    ctypes.CDLL(str(_PLUGIN_LIB), ctypes.RTLD_GLOBAL)
+    print(f"[pipeline] Loaded TRT plugin: {_PLUGIN_LIB}", flush=True)
+else:
+    print(f"[pipeline] WARNING: plugin lib not found at {_PLUGIN_LIB} — decode engine will fail", flush=True)
 
 
 @dataclass
@@ -272,8 +280,6 @@ def run(config: MultiStreamConfig) -> None:
     import cv2
     from metrics.csv_sink import CsvSink
     from pipelines.anonymisation import blur_bboxes
-    from models.output_parser import parse_yolo26_output
-
     pipeline = build_pipeline(config)
     loop = GLib.MainLoop()
 
@@ -286,6 +292,9 @@ def run(config: MultiStreamConfig) -> None:
     # the tracker. Reads NvDsInferTensorMeta (exposed because output-tensor-meta=1
     # in nvinfer_primary.txt) and creates NvDsObjectMeta for each YOLO26n detection.
     # network-type=100 means nvinfer itself won't create any object metas.
+    #
+    # The engine now includes the yolo26_decode TRT plugin (M2.3+M2.4): output is
+    # already in xywh pixel-space so no coordinate transform is needed here.
     _NET_W, _NET_H = 640, 640
     _scale_x = config.mux_width / _NET_W
     _scale_y = config.mux_height / _NET_H
@@ -321,16 +330,20 @@ def run(config: MultiStreamConfig) -> None:
                         _N_DETS, _N_ATTRS
                     ).copy()
 
-                    for det in parse_yolo26_output(tensor, conf_threshold=config.conf_threshold):
+                    # Plugin output is [left, top, w, h, conf, cls] — no transform needed.
+                    for i in range(_N_DETS):
+                        conf = float(tensor[i, 4])
+                        if conf < config.conf_threshold:
+                            continue
                         obj_meta = pyds.nvds_acquire_obj_meta_from_pool(batch_meta)
                         obj_meta.unique_component_id = tensor_meta.unique_id
-                        obj_meta.confidence = det["confidence"]
-                        obj_meta.class_id = det["class_id"]
+                        obj_meta.confidence = conf
+                        obj_meta.class_id = int(tensor[i, 5])
                         rect = obj_meta.rect_params
-                        rect.left = det["left"] * _scale_x
-                        rect.top = det["top"] * _scale_y
-                        rect.width = det["width"] * _scale_x
-                        rect.height = det["height"] * _scale_y
+                        rect.left = float(tensor[i, 0]) * _scale_x
+                        rect.top = float(tensor[i, 1]) * _scale_y
+                        rect.width = float(tensor[i, 2]) * _scale_x
+                        rect.height = float(tensor[i, 3]) * _scale_y
                         rect.border_width = 3
                         rect.border_color.red = 0.0
                         rect.border_color.green = 1.0

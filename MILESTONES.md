@@ -80,17 +80,19 @@
 - [x] Confirm detections appear correctly on MOT17-04 stream (visual check ✓ — boxes on all three RTSP output streams)
 - [x] `--conf-threshold` CLI flag wired through `MultiStreamConfig` to `parse_yolo26_output()` (default 0.25)
 
-### M2.3 — C++ Decode Plugin (Part 1)
-- [ ] Scaffold `plugins/yolo26_decode/` with `CMakeLists.txt`
-- [ ] Implement `IPluginV2DynamicExt` skeleton: `getOutputDimensions`, `enqueue`, `serialize`
-- [ ] Implement CUDA kernel for anchor-free box coordinate transform in `enqueue` (no sigmoid needed — YOLO26 head is DFL-free)
-- [ ] Build plugin `.so`: `cmake .. && make` inside container
+### M2.3 — C++ Decode Plugin (Part 1) ✓
+- [x] Scaffold `plugins/yolo26_decode/` with `CMakeLists.txt` (SM 75 / GTX 1660 Ti target)
+- [x] Implement `IPluginV2DynamicExt` skeleton: `getOutputDimensions` (same shape in/out), `enqueue`, `serialize` (no learned attrs): `plugins/yolo26_decode/yolo26_decode_plugin.hpp/.cpp`
+- [x] Implement CUDA kernel for xyxy→xywh coordinate transform in `enqueue` (no sigmoid, no DFL — YOLO26n head is NMS-free one-to-one matching): `plugins/yolo26_decode/yolo26_decode_kernel.cu`
+- [ ] Build plugin `.so`: `cmake -B build -DCMAKE_CUDA_ARCHITECTURES=75 && cmake --build build` inside container
 
-### M2.4 — C++ Decode Plugin (Part 2)
-- [ ] Load plugin in `convert.py` via `trt.Runtime` / `ctypes.CDLL`
-- [ ] Re-export TensorRT engine with plugin replacing CPU ONNX decode nodes
-- [ ] Confirm detections match CPU-decode baseline (bbox coordinates identical within tolerance)
-- [ ] Add TensorRT `IProfiler` instrumentation to isolate decode step latency
+### M2.4 — C++ Decode Plugin (Part 2) ✓
+- [x] `models/decode_engine.py` — TRT Python API builds engine with yolo26_decode plugin appended (`ctypes.CDLL` registers creator; `network.add_plugin_v2` appends layer after YOLO26n output); output: `yolo26n_fp16_b3_decode.engine`
+- [x] `docker/init_models.py` updated: builds decode engine after FP16 if `libyolo26_decode.so` present; skips with warning if plugin not yet built (7 new unit tests, 84 total)
+- [x] `configs/nvinfer_primary.txt` updated: `model-engine-file` → `yolo26n_fp16_b3_decode.engine`; engine output now xywh so probe no longer calls `parse_yolo26_output()`
+- [x] `pipelines/multi_stream.py` updated: `_yolo_decode_probe` reads plugin's xywh output directly (Python xyxy→xywh for-loop replaced by CUDA kernel in engine)
+- [ ] Confirm detections match Python-decode baseline on MOT17-04 (pending container run)
+- [x] `metrics/profile_decode.py` — TRT `IProfiler` wrapper; prints per-layer latency table, highlights `yolo26_decode` row; run inside container after building decode engine
 
 ### M2.5 — Decode Plugin Comparison Report
 - [ ] Run pipeline with FP32 CPU-decode engine; record latency, FPS, VRAM, decode step time

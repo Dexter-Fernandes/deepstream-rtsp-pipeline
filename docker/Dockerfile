@@ -13,8 +13,18 @@ RUN git clone https://github.com/NVIDIA-AI-IOT/deepstream_python_apps.git /opt/d
     && make -j$(nproc) \
     && find . -name "pyds*.so" -exec cp {} /usr/local/lib/python3.12/dist-packages/ \;
 
-RUN pip3 install opencv-python-headless ultralytics
+RUN pip3 install opencv-python-headless ultralytics pycuda
+
+# Compile yolo26_decode TRT plugin (SM 75 = GTX 1660 Ti).
+# The .so is baked into the image so init_models.py can build the decode
+# engine on first container start without any manual pre-steps.
+COPY plugins/yolo26_decode/ /tmp/yolo26_decode/
+RUN cmake -B /tmp/yolo26_decode/build -S /tmp/yolo26_decode \
+        -DCMAKE_CUDA_ARCHITECTURES=75 \
+    && cmake --build /tmp/yolo26_decode/build -j$(nproc) \
+    && cmake --install /tmp/yolo26_decode/build \
+    && rm -rf /tmp/yolo26_decode
 
 WORKDIR /workspace
-COPY init_models.py /init_models.py
+COPY docker/init_models.py /init_models.py
 ENTRYPOINT ["python3", "/init_models.py"]

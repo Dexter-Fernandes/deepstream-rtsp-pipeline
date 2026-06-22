@@ -2,6 +2,7 @@ from pathlib import Path
 
 from docker.init_models import ensure_models
 from models.convert import engine_path
+from models.decode_engine import decode_engine_path
 
 
 def _make_engines_dir(tmp_path: Path, max_batch: int = 3) -> tuple[Path, Path, Path, Path]:
@@ -130,3 +131,42 @@ def test_cold_start_calls_export_and_both_conversions(tmp_path):
         convert_fn=fake_convert,
     )
     assert calls == ["export", "convert_fp32", "convert_fp16"]
+
+
+def test_skips_decode_when_plugin_lib_missing(tmp_path):
+    engines, onnx, fp32, fp16 = _make_engines_dir(tmp_path)
+    onnx.touch()
+    fp32.touch()
+    fp16.touch()
+
+    decode_calls = []
+    ensure_models(
+        weights=tmp_path / "yolo26n.pt",
+        engines_dir=engines,
+        plugin_lib=tmp_path / "libyolo26_decode.so",  # does not exist
+        export_fn=lambda *a, **kw: None,
+        convert_fn=lambda *a, **kw: None,
+        decode_fn=lambda *a, **kw: decode_calls.append("decode"),
+    )
+    assert decode_calls == []
+
+
+def test_builds_decode_when_plugin_lib_exists(tmp_path):
+    engines, onnx, fp32, fp16 = _make_engines_dir(tmp_path)
+    onnx.touch()
+    fp32.touch()
+    fp16.touch()
+
+    plugin_lib = tmp_path / "libyolo26_decode.so"
+    plugin_lib.touch()  # simulate .so present
+
+    decode_calls = []
+    ensure_models(
+        weights=tmp_path / "yolo26n.pt",
+        engines_dir=engines,
+        plugin_lib=plugin_lib,
+        export_fn=lambda *a, **kw: None,
+        convert_fn=lambda *a, **kw: None,
+        decode_fn=lambda onnx_path, pl, fp16, max_batch, output_dir: decode_calls.append("decode"),
+    )
+    assert decode_calls == ["decode"]

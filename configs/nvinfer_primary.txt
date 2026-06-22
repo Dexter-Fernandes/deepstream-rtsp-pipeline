@@ -2,7 +2,7 @@
 gpu-id=0
 net-scale-factor=0.00392156862745098
 onnx-file=/workspace/models/engines/yolo26n.onnx
-model-engine-file=/workspace/models/engines/yolo26n_fp16_b3.engine
+model-engine-file=/workspace/models/engines/yolo26n_fp16_b3_decode.engine
 labelfile-path=/workspace/models/engines/labels.txt
 batch-size=1
 process-mode=1
