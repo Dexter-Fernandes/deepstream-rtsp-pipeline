@@ -45,6 +45,16 @@ def test_write_field_values(tmp_path):
     assert float(r["confidence"]) == 0.75
 
 
+def test_write_flushes_without_explicit_close(tmp_path):
+    path = tmp_path / "out.csv"
+    sink = CsvSink(path)
+    sink.write([_det()])
+    # data must be on disk immediately — no close() called
+    rows = list(csv.reader(path.open()))
+    assert len(rows) == 2
+    sink.close()
+
+
 def test_flush_persists_data(tmp_path):
     path = tmp_path / "out.csv"
     sink = CsvSink(path)

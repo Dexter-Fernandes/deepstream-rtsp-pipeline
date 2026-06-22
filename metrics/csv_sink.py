@@ -19,6 +19,7 @@ class CsvSink:
                 d.frame_num, d.object_id, d.class_id, d.class_label,
                 d.confidence, d.left, d.top, d.width, d.height,
             ])
+        self._file.flush()
 
     def flush(self) -> None:
         self._file.flush()
