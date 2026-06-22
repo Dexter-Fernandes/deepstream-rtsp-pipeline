@@ -13,6 +13,7 @@ class PipelineConfig:
     mux_width: int = 1920
     mux_height: int = 1080
     batch_size: int = 1
+    output_csv: str = "output.csv"
 
 
 def parse_args(argv: list[str] | None = None) -> PipelineConfig:
@@ -29,8 +30,14 @@ def parse_args(argv: list[str] | None = None) -> PipelineConfig:
         help="Path to nvinfer config file",
     )
     parser.add_argument("--retry", type=int, default=3, help="rtspsrc retry count")
+    parser.add_argument("--output", default="output.csv", dest="output_csv", help="CSV output path")
     args = parser.parse_args(argv)
-    return PipelineConfig(uri=args.uri, nvinfer_config=args.nvinfer_config, retry=args.retry)
+    return PipelineConfig(
+        uri=args.uri,
+        nvinfer_config=args.nvinfer_config,
+        retry=args.retry,
+        output_csv=args.output_csv,
+    )
 
 
 def _source_props(config: PipelineConfig) -> dict:
@@ -118,9 +125,30 @@ def run(config: PipelineConfig) -> None:
     import gi
     gi.require_version("Gst", "1.0")
     from gi.repository import Gst, GLib
+    import pyds
+
+    from pipelines.metadata_parser import parse_frame_meta
+    from metrics.csv_sink import CsvSink
 
     pipeline = build_pipeline(config)
     loop = GLib.MainLoop()
+
+    csv_sink = CsvSink(config.output_csv)
+
+    osd_sink_pad = pipeline.get_by_name("osd").get_static_pad("sink")
+
+    def _probe(pad, info, _user_data):
+        gst_buffer = info.get_buffer()
+        if gst_buffer is None:
+            return Gst.PadProbeReturn.OK
+        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
+        if batch_meta is None:
+            return Gst.PadProbeReturn.OK
+        detections = parse_frame_meta(batch_meta)
+        csv_sink.write(detections)
+        return Gst.PadProbeReturn.OK
+
+    osd_sink_pad.add_probe(Gst.PadProbeType.BUFFER, _probe, 0)
 
     bus = pipeline.get_bus()
     bus.add_signal_watch()
@@ -148,11 +176,12 @@ def run(config: PipelineConfig) -> None:
     if ret == Gst.StateChangeReturn.FAILURE:
         raise RuntimeError("Failed to set pipeline to PLAYING")
 
-    print(f"Pipeline running — source: {config.uri}")
+    print(f"Pipeline running — source: {config.uri}  output: {config.output_csv}")
     try:
         loop.run()
     finally:
         pipeline.set_state(Gst.State.NULL)
+        csv_sink.close()
 
 
 if __name__ == "__main__":

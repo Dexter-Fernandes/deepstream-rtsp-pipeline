@@ -1,12 +1,11 @@
-# Run mediamtx from the project root:
-#   PROJECT_ROOT=$(pwd) mediamtx configs/mediamtx.yml
+# Run mediamtx from the project root
 
 paths:
   stream0:
     # MOT17-04: benchmark sequence (static camera, high density, 1050 frames, has GT)
     runOnInit: >
       ffmpeg -re -stream_loop -1
-      -i $PROJECT_ROOT/data/mot17_04.mp4
+      -i data/mot17_04.mp4
       -c copy -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
     runOnInitRestart: yes
 
@@ -14,7 +13,7 @@ paths:
     # MOT17-13: visual demo sequence (busy crossing)
     runOnInit: >
       ffmpeg -re -stream_loop -1
-      -i $PROJECT_ROOT/data/mot17_13.mp4
+      -i data/mot17_13.mp4
       -c copy -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
     runOnInitRestart: yes
 
@@ -22,6 +21,6 @@ paths:
     # MOT17-02: multi-stream third feed (high density, different scene)
     runOnInit: >
       ffmpeg -re -stream_loop -1
-      -i $PROJECT_ROOT/data/mot17_02.mp4
+      -i data/mot17_02.mp4
       -c copy -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
     runOnInitRestart: yes
