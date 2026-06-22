@@ -248,4 +248,4 @@ metrics/*.nbconvert.ipynb
 handoff.md
 auto.crt
 auto.key
-output.csv
+output*.csv

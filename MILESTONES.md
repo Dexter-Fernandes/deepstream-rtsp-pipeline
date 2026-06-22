@@ -38,8 +38,8 @@
 - [x] Add "Privacy by Design" section to README
 
 ### M1.6 — Stream Validation
-- [ ] Run pipeline against `stream0` (MOT17-04), `stream1` (MOT17-13), `stream2` (MOT17-02) in sequence; confirm CSV populated for each
-- [ ] Confirm clean EOS and pipeline teardown on stream end for each
+- [x] Run pipeline against `stream0` (MOT17-04), `stream1` (MOT17-13), `stream2` (MOT17-02) in sequence; confirm CSV populated for each
+- [x] Confirm clean EOS and pipeline teardown on stream end for each
 - [ ] Record FP32 baseline: frames processed, mean FPS, peak VRAM (`nvidia-smi dmon`) on stream0 for 60 seconds
 
 ### M1.7 — Anonymisation Write-back + RTSP Re-stream
