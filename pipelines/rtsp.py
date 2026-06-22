@@ -65,13 +65,16 @@ def build_pipeline(config: PipelineConfig):
     mux = Gst.ElementFactory.make("nvstreammux", "mux")
     nvinfer = Gst.ElementFactory.make("nvinfer", "nvinfer")
     tracker = Gst.ElementFactory.make("nvtracker", "tracker")
+    converter = Gst.ElementFactory.make("nvvideoconvert", "converter")
+    caps_rgba = Gst.ElementFactory.make("capsfilter", "caps_rgba")
     osd = Gst.ElementFactory.make("nvdsosd", "osd")
     sink = Gst.ElementFactory.make("fakesink", "sink")
 
     for name, el in [
         ("rtspsrc", source), ("rtph264depay", depay), ("nvv4l2decoder", decoder),
         ("queue", queue), ("nvstreammux", mux), ("nvinfer", nvinfer),
-        ("nvtracker", tracker), ("nvdsosd", osd), ("fakesink", sink),
+        ("nvtracker", tracker), ("nvvideoconvert", converter),
+        ("capsfilter", caps_rgba), ("nvdsosd", osd), ("fakesink", sink),
     ]:
         if not el:
             raise RuntimeError(f"Could not create GStreamer element: {name}")
@@ -100,9 +103,15 @@ def build_pipeline(config: PipelineConfig):
     queue_src = queue.get_static_pad("src")
     queue_src.link(mux_sink)
 
+    caps_rgba.set_property(
+        "caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=RGBA")
+    )
+
     mux.link(nvinfer)
     nvinfer.link(tracker)
-    tracker.link(osd)
+    tracker.link(converter)
+    converter.link(caps_rgba)
+    caps_rgba.link(osd)
     osd.link(sink)
 
     # rtspsrc emits pad-added when the stream negotiates; wire depay then
@@ -128,7 +137,6 @@ def run(config: PipelineConfig) -> None:
     import pyds
 
     from pipelines.metadata_parser import parse_frame_meta
-    from pipelines.anonymisation import blur_bboxes
     from metrics.csv_sink import CsvSink
 
     pipeline = build_pipeline(config)
@@ -147,13 +155,6 @@ def run(config: PipelineConfig) -> None:
             return Gst.PadProbeReturn.OK
         detections = parse_frame_meta(batch_meta)
         csv_sink.write(detections)
-        l_frame = batch_meta.frame_meta_list
-        while l_frame is not None:
-            frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
-            n_frame = pyds.get_nvds_buf_surface(hash(gst_buffer), frame_meta.batch_id)
-            frame_dets = [d for d in detections if d.frame_num == frame_meta.frame_num]
-            blur_bboxes(n_frame, frame_dets)
-            l_frame = l_frame.next
         return Gst.PadProbeReturn.OK
 
     osd_sink_pad.add_probe(Gst.PadProbeType.BUFFER, _probe, 0)

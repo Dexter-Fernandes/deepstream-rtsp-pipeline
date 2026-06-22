@@ -4,7 +4,7 @@
 
 ## M1 — Pipeline Plumbing
 
-**Exit criteria:** live bounding boxes rendering from RTSP source (mediamtx/MOT17) using stock detection model.
+**Exit criteria:** detections written to CSV from all three RTSP streams; blurred output re-streamed and visible via `ffplay`; FP32 baseline FPS recorded.
 
 ### M1.1 — Environment Setup ✓
 - [x] Pull NGC DeepStream container (upgraded to `nvcr.io/nvidia/deepstream:9.0-triton-multiarch`; requires driver ≥ 590.48)
@@ -21,8 +21,10 @@
 - [x] Test against `rtsp://localhost:8554/stream0` (MOT17-04) — pipeline runs stably
 - [x] Add RTSP reconnect handling (`rtspsrc` `retry` and `timeout` properties)
 - [x] Confirm pipeline launches without GST errors; pipeline running confirmed
-- [x] Pre-build TensorRT FP32 engine via `trtexec`; cache in `models/engines/` (mounted at run time)
+- [x] TensorRT FP32 engine built by nvinfer on first run; cached in `models/primary_detector/` (workspace volume mount — persists across container restarts)
 - [x] 9 unit tests passing (CPU, CI-safe): config defaults, arg parsing, source properties
+
+### M1.3 — (merged into M1.2)
 
 ### M1.4 — CSV Metadata Sink ✓
 - [x] `pipelines/metadata_parser.py` — `Detection` dataclass + `parse_frame_meta()` (TDD, 20 tests passing)
@@ -31,11 +33,21 @@
 - [x] Confirm CSV populated: `wc -l output.csv` → 28298 lines on live pipeline (stream0, MOT17-04)
 - [x] Docker image updated to DS 9.0 (`nvcr.io/nvidia/deepstream:9.0-triton-multiarch`); pyds compiled from master branch; NVIDIA driver upgraded to 595
 
-### M1.5 — Anonymisation Probe ✓
+### M1.5 — Anonymisation Function ✓
 - [x] `pipelines/anonymisation.py` — `blur_bboxes()` (TDD, 6 tests passing)
-- [x] Wire probe after `nvosd` calling `blur_bboxes` on detected bbox regions
-- [ ] Confirm faces/plates are blurred in display output
 - [x] Add "Privacy by Design" section to README
+
+### M1.6 — Stream Validation
+- [ ] Run pipeline against `stream0` (MOT17-04), `stream1` (MOT17-13), `stream2` (MOT17-02) in sequence; confirm CSV populated for each
+- [ ] Confirm clean EOS and pipeline teardown on stream end for each
+- [ ] Record FP32 baseline: frames processed, mean FPS, peak VRAM (`nvidia-smi dmon`) on stream0 for 60 seconds
+
+### M1.7 — Anonymisation Write-back + RTSP Re-stream
+- [ ] Add `nvvideoconvert` CPU-copy path or CUDA memcpy to map NVMM frame to host before blurring (direct `get_nvds_buf_surface` + numpy access segfaults on NVMM buffers in Python probe)
+- [ ] Wire `blur_bboxes` back into the `_probe` in `pipelines/rtsp.py` using the mapped frame
+- [ ] Write blurred frame back to NVMM surface via CUDA
+- [ ] Add `nvrtspoutsinkbin` or `rtspclientsink` to re-stream blurred output on a second mediamtx path
+- [ ] Confirm blurred output visible via `ffplay rtsp://localhost:8554/stream0_out`
 
 ---
 

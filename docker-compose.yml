@@ -1,0 +1,32 @@
+services:
+  pipeline:
+    build: docker/
+    image: ds-pipeline
+    network_mode: host
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    environment:
+      - PYTHONPATH=/workspace
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+    stdin_open: true
+    tty: true
+    command: ["python3", "pipelines/rtsp.py", "--output", "/workspace/output.csv"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # dashboard:
+  #   build: .
+  #   network_mode: host
+  #   volumes:
+  #     - .:/workspace
+  #   working_dir: /workspace
+  #   command: ["python3", "-m", "metrics.dashboard"]
+  #   depends_on:
+  #     - pipeline

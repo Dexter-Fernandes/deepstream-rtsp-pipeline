@@ -13,4 +13,6 @@ RUN git clone https://github.com/NVIDIA-AI-IOT/deepstream_python_apps.git /opt/d
     && make -j$(nproc) \
     && find . -name "pyds*.so" -exec cp {} /usr/local/lib/python3.12/dist-packages/ \;
 
+RUN pip3 install opencv-python-headless
+
 WORKDIR /workspace
