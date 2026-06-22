@@ -16,6 +16,7 @@ class MultiStreamConfig:
     output_dir: str = "."
     restream_base_port: int | None = None
     anonymise: bool = False
+    conf_threshold: float = 0.25
 
 
 def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
@@ -26,6 +27,7 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
     parser.add_argument("--output-dir", default=".", dest="output_dir", help="Directory for per-source CSV files")
     parser.add_argument("--restream-base-port", type=int, default=None, dest="restream_base_port", help="Base port for nvrtspoutsinkbin (stream0=base, stream1=base+1, ...)")
     parser.add_argument("--anonymise", action="store_true", dest="anonymise", help="Enable blur anonymisation")
+    parser.add_argument("--conf-threshold", type=float, default=0.25, dest="conf_threshold", help="Detection confidence threshold (default: 0.25)")
     args = parser.parse_args(argv)
     return MultiStreamConfig(
         uris=args.uris,
@@ -34,6 +36,7 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
         output_dir=args.output_dir,
         restream_base_port=args.restream_base_port,
         anonymise=args.anonymise,
+        conf_threshold=args.conf_threshold,
     )
 
 
@@ -259,6 +262,7 @@ def _parse_frame_detections(frame_meta):
 
 
 def run(config: MultiStreamConfig) -> None:
+    import ctypes
     import gi
     gi.require_version("Gst", "1.0")
     from gi.repository import Gst, GLib
@@ -268,6 +272,7 @@ def run(config: MultiStreamConfig) -> None:
     import cv2
     from metrics.csv_sink import CsvSink
     from pipelines.anonymisation import blur_bboxes
+    from models.output_parser import parse_yolo26_output
 
     pipeline = build_pipeline(config)
     loop = GLib.MainLoop()
@@ -276,6 +281,77 @@ def run(config: MultiStreamConfig) -> None:
         i: CsvSink(_output_csv_path(config.output_dir, i))
         for i in range(len(config.uris))
     }
+
+    # Decode probe on the nvinfer SRC pad — fires once per batched buffer before
+    # the tracker. Reads NvDsInferTensorMeta (exposed because output-tensor-meta=1
+    # in nvinfer_primary.txt) and creates NvDsObjectMeta for each YOLO26n detection.
+    # network-type=100 means nvinfer itself won't create any object metas.
+    _NET_W, _NET_H = 640, 640
+    _scale_x = config.mux_width / _NET_W
+    _scale_y = config.mux_height / _NET_H
+    _N_DETS, _N_ATTRS = 300, 6
+
+    def _yolo_decode_probe(pad, info, _user_data):
+        gst_buffer = info.get_buffer()
+        if gst_buffer is None:
+            return Gst.PadProbeReturn.OK
+        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
+        if batch_meta is None:
+            return Gst.PadProbeReturn.OK
+
+        frame_meta_list = batch_meta.frame_meta_list
+        while frame_meta_list is not None:
+            try:
+                frame_meta = pyds.NvDsFrameMeta.cast(frame_meta_list.data)
+            except StopIteration:
+                break
+
+            user_meta_list = frame_meta.frame_user_meta_list
+            while user_meta_list is not None:
+                try:
+                    user_meta = pyds.NvDsUserMeta.cast(user_meta_list.data)
+                except StopIteration:
+                    break
+
+                if user_meta.base_meta.meta_type == pyds.NvDsMetaType.NVDSINFER_TENSOR_OUTPUT_META:
+                    tensor_meta = pyds.NvDsInferTensorMeta.cast(user_meta.user_meta_data)
+                    layer = pyds.get_nvds_LayerInfo(tensor_meta, 0)
+                    ptr = ctypes.cast(pyds.get_ptr(layer.buffer), ctypes.POINTER(ctypes.c_float))
+                    tensor = np.ctypeslib.as_array(ptr, shape=(_N_DETS * _N_ATTRS,)).reshape(
+                        _N_DETS, _N_ATTRS
+                    ).copy()
+
+                    for det in parse_yolo26_output(tensor, conf_threshold=config.conf_threshold):
+                        obj_meta = pyds.nvds_acquire_obj_meta_from_pool(batch_meta)
+                        obj_meta.unique_component_id = tensor_meta.unique_id
+                        obj_meta.confidence = det["confidence"]
+                        obj_meta.class_id = det["class_id"]
+                        rect = obj_meta.rect_params
+                        rect.left = det["left"] * _scale_x
+                        rect.top = det["top"] * _scale_y
+                        rect.width = det["width"] * _scale_x
+                        rect.height = det["height"] * _scale_y
+                        rect.border_width = 3
+                        rect.border_color.red = 0.0
+                        rect.border_color.green = 1.0
+                        rect.border_color.blue = 0.0
+                        rect.border_color.alpha = 1.0
+                        pyds.nvds_add_obj_meta_to_frame(frame_meta, obj_meta, None)
+
+                try:
+                    user_meta_list = user_meta_list.next
+                except StopIteration:
+                    break
+
+            try:
+                frame_meta_list = frame_meta_list.next
+            except StopIteration:
+                break
+
+        return Gst.PadProbeReturn.OK
+
+    nvinfer_src = pipeline.get_by_name("nvinfer").get_static_pad("src")
+    nvinfer_src.add_probe(Gst.PadProbeType.BUFFER, _yolo_decode_probe, 0)
 
     # One probe per per-branch nvdsosd sink pad — fires before that branch's OSD
     # draws. After the demux each buffer carries a single source's frame, so the

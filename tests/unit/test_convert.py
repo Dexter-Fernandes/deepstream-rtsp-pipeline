@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import pytest
-
 from models.convert import build_trtexec_cmd, engine_path, parse_args
 
 
@@ -95,3 +93,34 @@ def test_trtexec_cmd_starts_with_trtexec(tmp_path):
     out = tmp_path / "yolo26n_fp32.engine"
     cmd = build_trtexec_cmd(onnx, out, fp16=False)
     assert cmd[0] == "trtexec"
+
+
+# ---------------------------------------------------------------------------
+# dynamic-batch shape flags (max_batch > 1)
+# ---------------------------------------------------------------------------
+
+
+def test_engine_path_includes_batch_suffix_when_dynamic(tmp_path):
+    onnx = Path("models/engines/yolo26n.onnx")
+    result = engine_path(onnx, fp16=False, output_dir=tmp_path, max_batch=3)
+    assert result == tmp_path / "yolo26n_fp32_b3.engine"
+
+
+def test_trtexec_cmd_has_shape_flags_for_dynamic_batch(tmp_path):
+    onnx = tmp_path / "yolo26n.onnx"
+    out = tmp_path / "yolo26n_fp32_b3.engine"
+    cmd = build_trtexec_cmd(onnx, out, fp16=False, max_batch=3)
+    joined = " ".join(cmd)
+    assert "--minShapes" in joined
+    assert "--optShapes" in joined
+    assert "--maxShapes" in joined
+
+
+def test_trtexec_cmd_shape_flags_use_input_name_and_batch(tmp_path):
+    onnx = tmp_path / "yolo26n.onnx"
+    out = tmp_path / "yolo26n_fp32_b3.engine"
+    cmd = build_trtexec_cmd(onnx, out, fp16=False, max_batch=3, input_name="images")
+    joined = " ".join(cmd)
+    assert "--minShapes=images:1x3x640x640" in joined
+    assert "--optShapes=images:3x3x640x640" in joined
+    assert "--maxShapes=images:3x3x640x640" in joined

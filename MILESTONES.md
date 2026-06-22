@@ -65,17 +65,20 @@
 
 ### M2.1 — YOLO26n Export ✓
 - [x] Install `ultralytics` in container (`docker/Dockerfile`)
-- [x] Export `yolo26n.pt` → ONNX (YOLO26 is NMS-free by default; no `nms=False` flag needed): `models/export_yolo26.py`
-- [x] Write `models/convert.py`: ONNX → TensorRT FP32 baseline engine via `trtexec`
+- [x] Export `yolo26n.pt` → ONNX with dynamic batch (YOLO26 is NMS-free by default; no `nms=False` flag needed): `models/export_yolo26.py`
+- [x] Write `models/convert.py`: ONNX → TensorRT FP32 baseline engine via `trtexec`; `--max-batch` flag adds `--minShapes/--optShapes/--maxShapes` for dynamic-batch engines
 - [x] Add FP16 conversion path to `convert.py`: `--fp16` flag
 - [x] Document INT8 exclusion in `convert.py` comments (no Tensor Cores on 1660Ti)
-- [x] Container auto-init: `docker/init_models.py` — sequential export → FP32 → FP16 on first start, skip-if-exists on warm restart; wired via `ENTRYPOINT` in Dockerfile (21 new unit tests, 68 total)
-- [ ] Confirm both engines load in TensorRT without error (pending successful `trtexec` run)
+- [x] Container auto-init: `docker/init_models.py` — sequential export → FP32 → FP16 (`max_batch=3`) on first start, skip-if-exists on warm restart; wired via `ENTRYPOINT` in Dockerfile (21 new unit tests)
+- [x] Confirm both engines load in TensorRT without error; FP16 engine (`yolo26n_fp16_b3.engine`) selected for production
 
-### M2.2 — nvinfer Custom Output Parser
-- [ ] `models/output_parser.py` — `parse_yolo26_output()` anchor-free, DFL-free decode (TDD, 5 tests passing)
-- [ ] Wire parser into `nvinfer` config (`parse-bbox-func-name`, `custom-lib-path`)
-- [ ] Confirm detections appear correctly on MOT17-04 stream (visual check)
+### M2.2 — nvinfer Custom Output Parser ✓
+- [x] `models/output_parser.py` — `parse_yolo26_output()` anchor-free, DFL-free decode (TDD, 6 tests passing); output tensor shape `[1, 300, 6]`: 300 top detections × `[x1,y1,x2,y2,conf,cls]` in pixel space
+- [x] Wire parser via Python tensor-meta probe on nvinfer SRC pad (`output-tensor-meta=1`, `network-type=100` in nvinfer config; no C .so needed — decode stays in Python for testability; C CUDA kernel replaces it in M2.3)
+- [x] Update `configs/nvinfer_primary.txt`: YOLO26n FP16 engine (`yolo26n_fp16_b3.engine`), 80 COCO classes, cluster-mode removed (NMS baked into model)
+- [x] YOLO26n re-exported with `dynamic=True`; engines rebuilt with `max_batch=3` (`--minShapes/--optShapes/--maxShapes`); supports batch 1–3 in a single engine file; 3 new convert tests (77 total)
+- [x] Confirm detections appear correctly on MOT17-04 stream (visual check ✓ — boxes on all three RTSP output streams)
+- [x] `--conf-threshold` CLI flag wired through `MultiStreamConfig` to `parse_yolo26_output()` (default 0.25)
 
 ### M2.3 — C++ Decode Plugin (Part 1)
 - [ ] Scaffold `plugins/yolo26_decode/` with `CMakeLists.txt`

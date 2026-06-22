@@ -31,8 +31,9 @@ def export(weights: Path, output_dir: Path) -> Path:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     model = YOLO(str(weights))
-    # YOLO26 is NMS-free by default; dynamic=False fixes input shape for trtexec
-    model.export(format="onnx", dynamic=False, imgsz=640)
+    # YOLO26 is NMS-free by default; dynamic=True makes the batch dimension
+    # flexible so trtexec can build engines for batch 1..N with --minShapes etc.
+    model.export(format="onnx", dynamic=True, imgsz=640)
 
     # ultralytics writes <stem>.onnx alongside the .pt file
     onnx_src = weights.with_suffix(".onnx")
