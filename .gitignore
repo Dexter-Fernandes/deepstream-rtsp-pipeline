@@ -246,3 +246,6 @@ metrics/*.nbconvert.ipynb
 
 # Session handoff docs
 handoff.md
+auto.crt
+auto.key
+output.csv
