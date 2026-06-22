@@ -1,4 +1,4 @@
-from pipelines.rtsp import PipelineConfig, parse_args, _source_props
+from pipelines.rtsp import PipelineConfig, parse_args, _source_props, _restream_sink_props
 
 
 def test_default_uri():
@@ -40,3 +40,27 @@ def test_source_props_retry():
 def test_source_props_timeout():
     config = PipelineConfig(timeout_us=10_000_000)
     assert _source_props(config)["timeout"] == 10_000_000
+
+
+def test_default_restream_uri_is_none():
+    assert PipelineConfig().restream_uri is None
+
+
+def test_parse_args_restream_uri_set():
+    config = parse_args(["--restream-uri", "rtsp://localhost:8554/stream0_out"])
+    assert config.restream_uri == "rtsp://localhost:8554/stream0_out"
+
+
+def test_parse_args_no_restream_uri_stays_none():
+    config = parse_args([])
+    assert config.restream_uri is None
+
+
+def test_restream_sink_props_port():
+    props = _restream_sink_props("rtsp://localhost:8554/stream0_out")
+    assert props["rtsp-port"] == 8554
+
+
+def test_restream_sink_props_mount_point():
+    props = _restream_sink_props("rtsp://localhost:8554/stream0_out")
+    assert props["rtsp-mount-point"] == "/stream0_out"

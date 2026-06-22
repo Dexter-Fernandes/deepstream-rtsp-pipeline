@@ -1,25 +1,45 @@
+x-pipeline: &pipeline-base
+  build: docker/
+  image: ds-pipeline
+  network_mode: host
+  volumes:
+    - .:/workspace
+  working_dir: /workspace
+  environment:
+    - PYTHONPATH=/workspace
+    - NVIDIA_VISIBLE_DEVICES=all
+    - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+  stdin_open: true
+  tty: true
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
 services:
-  pipeline:
-    build: docker/
-    image: ds-pipeline
-    network_mode: host
-    volumes:
-      - .:/workspace
-    working_dir: /workspace
-    environment:
-      - PYTHONPATH=/workspace
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
-    stdin_open: true
-    tty: true
-    command: ["python3", "pipelines/rtsp.py", "--output", "/workspace/output.csv"]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+  pipeline0:
+    <<: *pipeline-base
+    command: ["python3", "pipelines/rtsp.py",
+              "--uri", "rtsp://localhost:8554/stream0",
+              "--restream-uri", "rtsp://localhost:8556/stream0_out",
+              "--output", "/workspace/output_stream0.csv"]
+
+  pipeline1:
+    <<: *pipeline-base
+    command: ["python3", "pipelines/rtsp.py",
+              "--uri", "rtsp://localhost:8554/stream1",
+              "--restream-uri", "rtsp://localhost:8557/stream1_out",
+              "--output", "/workspace/output_stream1.csv"]
+
+  pipeline2:
+    <<: *pipeline-base
+    command: ["python3", "pipelines/rtsp.py",
+              "--uri", "rtsp://localhost:8554/stream2",
+              "--restream-uri", "rtsp://localhost:8558/stream2_out",
+              "--output", "/workspace/output_stream2.csv"]
 
   # dashboard:
   #   build: .

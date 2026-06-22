@@ -14,6 +14,8 @@ class PipelineConfig:
     mux_height: int = 1080
     batch_size: int = 1
     output_csv: str = "output.csv"
+    restream_uri: str | None = None
+    anonymise: bool = False
 
 
 def parse_args(argv: list[str] | None = None) -> PipelineConfig:
@@ -31,13 +33,26 @@ def parse_args(argv: list[str] | None = None) -> PipelineConfig:
     )
     parser.add_argument("--retry", type=int, default=3, help="rtspsrc retry count")
     parser.add_argument("--output", default="output.csv", dest="output_csv", help="CSV output path")
+    parser.add_argument("--restream-uri", default=None, dest="restream_uri", help="RTSP URI to re-stream blurred output")
+    parser.add_argument("--anonymise", action="store_true", dest="anonymise", help="Enable blur anonymisation")
     args = parser.parse_args(argv)
     return PipelineConfig(
         uri=args.uri,
         nvinfer_config=args.nvinfer_config,
         retry=args.retry,
         output_csv=args.output_csv,
+        restream_uri=args.restream_uri,
+        anonymise=args.anonymise,
     )
+
+
+def _restream_sink_props(uri: str) -> dict:
+    from urllib.parse import urlparse
+    parsed = urlparse(uri)
+    return {
+        "rtsp-port": parsed.port or 8554,
+        "rtsp-mount-point": parsed.path or "/ds-test",
+    }
 
 
 def _source_props(config: PipelineConfig) -> dict:
@@ -68,13 +83,17 @@ def build_pipeline(config: PipelineConfig):
     converter = Gst.ElementFactory.make("nvvideoconvert", "converter")
     caps_rgba = Gst.ElementFactory.make("capsfilter", "caps_rgba")
     osd = Gst.ElementFactory.make("nvdsosd", "osd")
-    sink = Gst.ElementFactory.make("fakesink", "sink")
+    if config.restream_uri:
+        sink = Gst.ElementFactory.make("nvrtspoutsinkbin", "sink")
+    else:
+        sink = Gst.ElementFactory.make("fakesink", "sink")
 
+    sink_element_name = "nvrtspoutsinkbin" if config.restream_uri else "fakesink"
     for name, el in [
         ("rtspsrc", source), ("rtph264depay", depay), ("nvv4l2decoder", decoder),
         ("queue", queue), ("nvstreammux", mux), ("nvinfer", nvinfer),
         ("nvtracker", tracker), ("nvvideoconvert", converter),
-        ("capsfilter", caps_rgba), ("nvdsosd", osd), ("fakesink", sink),
+        ("capsfilter", caps_rgba), ("nvdsosd", osd), (sink_element_name, sink),
     ]:
         if not el:
             raise RuntimeError(f"Could not create GStreamer element: {name}")
@@ -89,6 +108,10 @@ def build_pipeline(config: PipelineConfig):
     mux.set_property("batched-push-timeout", 4_000_000)
 
     nvinfer.set_property("config-file-path", config.nvinfer_config)
+
+    if config.restream_uri:
+        for prop, val in _restream_sink_props(config.restream_uri).items():
+            sink.set_property(prop, val)
 
     tracker.set_property(
         "ll-lib-file",
@@ -106,6 +129,9 @@ def build_pipeline(config: PipelineConfig):
     caps_rgba.set_property(
         "caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=RGBA")
     )
+    # nvbuf-mem-cuda-unified: NVMM surface accessible from CPU without segfault.
+    # This is required for pyds.get_nvds_buf_surface in a Python probe on dGPU.
+    converter.set_property("nvbuf-memory-type", 3)
 
     mux.link(nvinfer)
     nvinfer.link(tracker)
@@ -136,14 +162,19 @@ def run(config: PipelineConfig) -> None:
     from gi.repository import Gst, GLib
     import pyds
 
+    import numpy as np
+    import cv2
     from pipelines.metadata_parser import parse_frame_meta
     from metrics.csv_sink import CsvSink
+    from pipelines.anonymisation import blur_bboxes
 
     pipeline = build_pipeline(config)
     loop = GLib.MainLoop()
 
     csv_sink = CsvSink(config.output_csv)
 
+    # Probe on osd sink pad. converter uses nvbuf-mem-cuda-unified so the
+    # NVMM surface is CPU-accessible; pyds.get_nvds_buf_surface works safely.
     osd_sink_pad = pipeline.get_by_name("osd").get_static_pad("sink")
 
     def _probe(pad, info, _user_data):
@@ -154,6 +185,15 @@ def run(config: PipelineConfig) -> None:
         if batch_meta is None:
             return Gst.PadProbeReturn.OK
         detections = parse_frame_meta(batch_meta)
+
+        if config.anonymise and detections:
+            surface = pyds.get_nvds_buf_surface(hash(gst_buffer), 0)
+            if surface is not None:
+                frame_view = np.array(surface, copy=False)
+                frame_bgr = cv2.cvtColor(frame_view[:, :, :3], cv2.COLOR_RGB2BGR)
+                blurred_bgr = blur_bboxes(frame_bgr, detections)
+                frame_view[:, :, :3] = cv2.cvtColor(blurred_bgr, cv2.COLOR_BGR2RGB)
+
         csv_sink.write(detections)
         return Gst.PadProbeReturn.OK
 

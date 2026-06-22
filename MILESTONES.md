@@ -4,7 +4,7 @@
 
 ## M1 — Pipeline Plumbing
 
-**Exit criteria:** detections written to CSV from all three RTSP streams; blurred output re-streamed and visible via `ffplay`; FP32 baseline FPS recorded.
+**Exit criteria:** detections written to CSV from all three RTSP streams concurrently via a single `nvstreammux`; blurred output re-streamed and visible via `ffplay`; FP32 baseline FPS recorded.
 
 ### M1.1 — Environment Setup ✓
 - [x] Pull NGC DeepStream container (upgraded to `nvcr.io/nvidia/deepstream:9.0-triton-multiarch`; requires driver ≥ 590.48)
@@ -43,11 +43,19 @@
 - [ ] Record FP32 baseline: frames processed, mean FPS, peak VRAM (`nvidia-smi dmon`) on stream0 for 60 seconds
 
 ### M1.7 — Anonymisation Write-back + RTSP Re-stream
-- [ ] Add `nvvideoconvert` CPU-copy path or CUDA memcpy to map NVMM frame to host before blurring (direct `get_nvds_buf_surface` + numpy access segfaults on NVMM buffers in Python probe)
-- [ ] Wire `blur_bboxes` back into the `_probe` in `pipelines/rtsp.py` using the mapped frame
-- [ ] Write blurred frame back to NVMM surface via CUDA
-- [ ] Add `nvrtspoutsinkbin` or `rtspclientsink` to re-stream blurred output on a second mediamtx path
-- [ ] Confirm blurred output visible via `ffplay rtsp://localhost:8554/stream0_out`
+- [x] Add `nvvideoconvert` CPU-copy path or CUDA memcpy to map NVMM frame to host before blurring — `pipelines/frame_accessor.py` (`get_frame_rgba`/`write_frame_rgba`) with injectable `_get_surface` for unit testing (4 tests)
+- [x] Wire `blur_bboxes` back into the `_probe` in `pipelines/rtsp.py` using the mapped frame
+- [x] Write blurred frame back to NVMM surface via `write_frame_rgba` + `np.copyto`
+- [x] Add `nvrtspoutsinkbin` to re-stream blurred output on a second mediamtx path (`--restream-uri` flag; 3 new tests)
+- [x] Confirm blurred output visible via `ffplay rtsp://localhost:8556/stream0_out`
+
+### M1.8 — Multi-Stream Pipeline
+- [ ] Write `pipelines/multi_stream.py` — 3 concurrent `rtspsrc` bins into a single `nvstreammux` (batch-size=3)
+- [ ] Per-source CSV output keyed by `source_id` from `NvDsFrameMeta`
+- [ ] Per-source restream via `nvrtspoutsinkbin` (ports 8556/8557/8558 for stream0/1/2)
+- [ ] Replace three-container docker-compose with single `pipeline` service running `multi_stream.py`
+- [ ] Unit tests: multi-stream config defaults, source URI list parsing (TDD, CPU-safe)
+- [ ] Run all three streams concurrently; confirm all three CSVs populated and clean EOS
 
 ---
 
@@ -89,7 +97,7 @@
 
 ## M3 — Tracker Comparison + Multi-Stream + Hardening
 
-**Exit criteria:** tracker comparison report with full MOTA/HOTA/IDF1; 3-stream pipeline running; all tests passing; docs complete.
+**Exit criteria:** tracker comparison report with full MOTA/HOTA/IDF1; multi-stream benchmarking complete; all tests passing; docs complete.
 
 ### M3.1 — Tracker Configs
 - [ ] Write `configs/tracker_iou.yml` (IOU tracker config for DeepStream)
@@ -104,11 +112,9 @@
 - [ ] Add no-GT metrics: parse CSV for ID switches, track fragmentation, mean FPS, peak VRAM
 - [ ] Produce `metrics/tracker_comparison.ipynb` with full comparison table
 
-### M3.3 — Multi-Stream Pipeline
-- [ ] Write `pipelines/multi_stream.py` — 3 concurrent `rtspsrc` bins into single `nvstreammux`
-- [ ] Configure `nvstreammux` batch size, width, height for 3-stream load
-- [ ] Serve MOT17-04 on `stream0`, MOT17-13 on `stream1`, MOT17-02 on `stream2`
-- [ ] Run for 30 minutes; record per-stream FPS and aggregate VRAM
+### M3.3 — Multi-Stream Benchmarking
+- [ ] 30-minute stability run on all three streams; confirm no crash/memory leak
+- [ ] Record per-stream FPS and aggregate VRAM during 3-stream load
 - [ ] Document throughput degradation curve (1→2→3 streams) in README
 
 ### M3.4 — GPU Tests + CI
