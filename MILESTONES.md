@@ -6,7 +6,7 @@
 
 **Exit criteria:** live bounding boxes rendering from RTSP source (mediamtx/MOT17) using stock detection model.
 
-### M1.1 — Environment Setup
+### M1.1 — Environment Setup ✓
 - [x] Pull NGC DeepStream container (upgraded to `nvcr.io/nvidia/deepstream:9.0-triton-multiarch`; requires driver ≥ 590.48)
 - [x] Verify GPU passthrough: `docker run --gpus all --rm nvcr.io/nvidia/deepstream:7.1-triton-multiarch nvidia-smi`
 - [x] Install `mediamtx` on host; confirm it starts and serves an RTSP path
@@ -31,11 +31,11 @@
 - [x] Confirm CSV populated: `wc -l output.csv` → 28298 lines on live pipeline (stream0, MOT17-04)
 - [x] Docker image updated to DS 9.0 (`nvcr.io/nvidia/deepstream:9.0-triton-multiarch`); pyds compiled from master branch; NVIDIA driver upgraded to 595
 
-### M1.5 — Anonymisation Probe
-- [ ] `pipelines/anonymisation.py` — `blur_bboxes()` (TDD, 6 tests passing)
-- [ ] Wire probe after `nvosd` calling `blur_bboxes` on detected bbox regions
+### M1.5 — Anonymisation Probe ✓
+- [x] `pipelines/anonymisation.py` — `blur_bboxes()` (TDD, 6 tests passing)
+- [x] Wire probe after `nvosd` calling `blur_bboxes` on detected bbox regions
 - [ ] Confirm faces/plates are blurred in display output
-- [ ] Add "Privacy by Design" section to README
+- [x] Add "Privacy by Design" section to README
 
 ---
 

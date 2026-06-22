@@ -128,6 +128,7 @@ def run(config: PipelineConfig) -> None:
     import pyds
 
     from pipelines.metadata_parser import parse_frame_meta
+    from pipelines.anonymisation import blur_bboxes
     from metrics.csv_sink import CsvSink
 
     pipeline = build_pipeline(config)
@@ -146,6 +147,13 @@ def run(config: PipelineConfig) -> None:
             return Gst.PadProbeReturn.OK
         detections = parse_frame_meta(batch_meta)
         csv_sink.write(detections)
+        l_frame = batch_meta.frame_meta_list
+        while l_frame is not None:
+            frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
+            n_frame = pyds.get_nvds_buf_surface(hash(gst_buffer), frame_meta.batch_id)
+            frame_dets = [d for d in detections if d.frame_num == frame_meta.frame_num]
+            blur_bboxes(n_frame, frame_dets)
+            l_frame = l_frame.next
         return Gst.PadProbeReturn.OK
 
     osd_sink_pad.add_probe(Gst.PadProbeType.BUFFER, _probe, 0)
