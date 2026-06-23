@@ -1,0 +1,10 @@
+{
+  "MOTA": 0.137624,
+  "MOTP": 0.18708,
+  "IDF1": 0.256652,
+  "num_switches": 70,
+  "num_fragmentations": 641,
+  "unique_tracks": 116,
+  "total_predictions": 11449,
+  "total_gt": 47557
+}

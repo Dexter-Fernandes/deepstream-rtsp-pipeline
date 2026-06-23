@@ -149,7 +149,7 @@
 - [x] Note in commentary: real-time budget is violated by the tail, not the mean
 
 ### M2.7.3 — End-to-end pipeline framing
-- [x] Add a note distinguishing standalone `trtexec` numbers from full DeepStream throughput (`nvinfer` + `nvtracker` + OSD + re-stream consume the 3.8 ms headroom); defer measured end-to-end FPS to M3.3
+- [x] Add a note distinguishing standalone `trtexec` numbers from full DeepStream throughput (`nvinfer` + `nvtracker` + OSD + re-stream consume the 3.8 ms headroom); end-to-end FPS measured in M3.3 (131.3 FPS/stream unthrottled; 25 FPS/stream live; 7% overhead)
 - [x] INT8 as a third precision point deferred — see Stretch Goals (1660 Ti has no Tensor Cores; INT8 via DP4A possible but accuracy/speed trade-off better shown on RTX/Jetson)
 
 ---
@@ -172,12 +172,17 @@
 - [x] Produce `metrics/tracker_comparison.ipynb` with comparison table + bar charts (executed, outputs embedded)
 - [x] **Pipeline fix (prereq):** probe-injected objects were silently dropped by `nvtracker` — fixed by setting `frame_meta.bInferDone=1`, populating `detector_bbox_info.org_bbox_coords`, and `object_id=UNTRACKED_OBJECT_ID`. Added file-input source branch to `multi_stream.py` for GT-aligned eval (`--uri data/mot17_04.mp4` plays from frame 0). Regression tests added.
 
-### M3.3 — Live Pipeline End-to-End + Stability
+### M3.3 — Live Pipeline End-to-End + Stability ✓
 > Synthetic batch profiling (trtexec, 1/2/3/25/33/100) is done in M2.5/M2.6. This milestone measures the **real DeepStream pipeline** — `nvinfer` + `nvtracker` + OSD + re-stream — which the standalone-kernel numbers don't capture (gap flagged in M2.6.3).
-- [ ] Measure true end-to-end FPS on the live 3-stream pipeline (full graph, not standalone TRT); compare against the trtexec ceiling to quantify pipeline overhead
-- [ ] 30-minute stability run on all three streams; confirm no crash and no memory leak (sample RSS + VRAM over the run)
-- [ ] Record per-stream FPS and aggregate VRAM during sustained 3-stream load
-- [ ] Document the standalone-vs-end-to-end throughput gap in README
+- [x] Measure true end-to-end FPS on the live 3-stream pipeline (full graph, not standalone TRT); compare against the trtexec ceiling to quantify pipeline overhead (131.3 FPS/stream unthrottled vs 140.9 trtexec; 7% full-graph overhead)
+- [x] 30-minute stability run on all three streams; confirm no crash and no memory leak (RSS drift < 12 MB / 30 min; `leak_suspected=false`)
+- [x] Record per-stream FPS and aggregate VRAM during sustained 3-stream load (live: 29.7 FPS/stream; unthrottled: 131.3 FPS/stream; VRAM peak 781 MB unthrottled / 1 632 MB live; RSS −260 MB over 30 min — no leak)
+- [x] Document the standalone-vs-end-to-end throughput gap in README (end-to-end table added; deferral removed)
+- [x] `metrics/perf_monitor.py` — CPU-safe FPS/RSS/VRAM module with 21 unit tests (TDD slices 1–6)
+- [x] `pipelines/multi_stream.py` — `--perf-json`, `--perf-interval`, `--duration`, `--no-sync` flags; frame counter in `_probe`; GLib periodic sampler + duration timeout; JSON write in `finally`
+- [x] `metrics/stability_run.sh` — 30-min live RTSP driver (configurable via `DURATION=` env var)
+- [x] `metrics/throughput_run.sh` — 120 s unthrottled file-source ceiling driver with nvidia-smi poller
+- [x] `metrics/stability.ipynb` — 4-cell executed notebook: FPS adherence / RSS+VRAM stability / ceiling-vs-trtexec bar chart / commentary
 
 ### M3.4 — GPU Tests + CI
 - [ ] Write `tests/smoke/test_pipeline_smoke.py` — launch rtsp pipeline for 10 seconds, assert frames_processed > 0 and CSV non-empty (requires GPU, `pytest --gpu`)

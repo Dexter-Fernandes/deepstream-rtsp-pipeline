@@ -25,7 +25,11 @@ class MultiStreamConfig:
     restream_base_port: int | None = None
     anonymise: bool = False
     conf_threshold: float = 0.25
-    tracker_config: str = "configs/tracker_iou.yml"
+    tracker_config: str = "configs/tracker_nvdcf.yml"
+    perf_json: str | None = None
+    perf_interval: float = 5.0
+    duration: int | None = None
+    no_sync: bool = False
 
 
 def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
@@ -39,10 +43,14 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
     parser.add_argument("--conf-threshold", type=float, default=0.25, dest="conf_threshold", help="Detection confidence threshold (default: 0.25)")
     parser.add_argument(
         "--tracker",
-        default="configs/tracker_iou.yml",
+        default="configs/tracker_nvdcf.yml",
         dest="tracker_config",
         help="Path to nvtracker YAML config (tracker_iou.yml / tracker_nvdcf.yml / tracker_bytetrack.yml)",
     )
+    parser.add_argument("--perf-json", default=None, dest="perf_json", metavar="PATH", help="Write perf JSON to PATH (enables monitoring)")
+    parser.add_argument("--perf-interval", type=float, default=5.0, dest="perf_interval", metavar="SECONDS", help="Perf sampling interval in seconds (default: 5.0)")
+    parser.add_argument("--duration", type=int, default=None, dest="duration", metavar="SECONDS", help="Auto-stop after SECONDS (for unattended runs)")
+    parser.add_argument("--no-sync", action="store_true", dest="no_sync", help="Disable sink sync (unthrottled throughput ceiling measurement)")
     args = parser.parse_args(argv)
     return MultiStreamConfig(
         uris=args.uris,
@@ -53,6 +61,10 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
         anonymise=args.anonymise,
         conf_threshold=args.conf_threshold,
         tracker_config=args.tracker_config,
+        perf_json=args.perf_json,
+        perf_interval=args.perf_interval,
+        duration=args.duration,
+        no_sync=args.no_sync,
     )
 
 
@@ -297,6 +309,8 @@ def build_pipeline(config: MultiStreamConfig):
             if not sink:
                 raise RuntimeError(f"Could not create fakesink for source {i}")
             pipeline.add(sink)
+            if config.no_sync:
+                sink.set_property("sync", False)
 
         demux_src = demux.request_pad_simple(f"src_{i}")
         demux_src.link(queue_out.get_static_pad("sink"))
@@ -341,6 +355,7 @@ def _parse_frame_detections(frame_meta):
 
 def run(config: MultiStreamConfig) -> None:
     import ctypes
+    import time
     import gi
     gi.require_version("Gst", "1.0")
     from gi.repository import Gst, GLib
@@ -349,6 +364,7 @@ def run(config: MultiStreamConfig) -> None:
     import numpy as np
     import cv2
     from metrics.csv_sink import CsvSink
+    from metrics.perf_monitor import PerfMonitor, sample_rss_mb, sample_vram_mb
     from pipelines.anonymisation import blur_bboxes
     pipeline = build_pipeline(config)
     loop = GLib.MainLoop()
@@ -357,6 +373,9 @@ def run(config: MultiStreamConfig) -> None:
         i: CsvSink(_output_csv_path(config.output_dir, i))
         for i in range(len(config.uris))
     }
+
+    n = len(config.uris)
+    frame_counts = {i: 0 for i in range(n)}
 
     # Decode probe on the nvinfer SRC pad — fires once per batched buffer before
     # the tracker. Reads NvDsInferTensorMeta (exposed because output-tensor-meta=1
@@ -474,6 +493,7 @@ def run(config: MultiStreamConfig) -> None:
                 break
 
             source_id = frame_meta.source_id
+            frame_counts[source_id] = frame_counts.get(source_id, 0) + 1
             detections = _parse_frame_detections(frame_meta)
 
             # Optional: blur bboxes in-place on the NVMM surface before OSD draws
@@ -499,6 +519,34 @@ def run(config: MultiStreamConfig) -> None:
     for i in range(len(config.uris)):
         osd_sink_pad = pipeline.get_by_name(f"osd_{i}").get_static_pad("sink")
         osd_sink_pad.add_probe(Gst.PadProbeType.BUFFER, _probe, 0)
+
+    # Optional perf monitoring — enabled only when --perf-json is set
+    perf_monitor = None
+    if config.perf_json:
+        _perf_start = time.time()
+        perf_monitor = PerfMonitor(num_sources=n, start_t=0.0)
+        _prev_counts = {i: 0 for i in range(n)}
+
+        def _perf_tick():
+            now = time.time()
+            dt = now - _perf_start
+            vram = sample_vram_mb()
+            rss = sample_rss_mb()
+            counts = dict(frame_counts)
+            perf_monitor.record(t=now - _perf_start, frame_counts=counts, vram_mb=vram, rss_mb=rss)
+            fps_per = sum(counts.values()) / n / dt if dt > 0 and n > 0 else 0.0
+            print(f"[perf] t={dt:.0f}s fps/stream={fps_per:.1f} vram={vram:.0f}MB rss={rss:.0f}MB", flush=True)
+            return True  # keep firing
+
+        GLib.timeout_add_seconds(int(config.perf_interval), _perf_tick)
+
+    if config.duration:
+        def _on_duration_timeout():
+            print(f"[pipeline] --duration {config.duration}s elapsed — stopping")
+            loop.quit()
+            return False
+
+        GLib.timeout_add_seconds(config.duration, _on_duration_timeout)
 
     bus = pipeline.get_bus()
     bus.add_signal_watch()
@@ -534,6 +582,17 @@ def run(config: MultiStreamConfig) -> None:
         pipeline.set_state(Gst.State.NULL)
         for sink in csv_sinks.values():
             sink.close()
+        if perf_monitor is not None and config.perf_json:
+            # Flush a final sample so short runs (EOS before first tick) have data
+            now = time.time()
+            perf_monitor.record(
+                t=now - _perf_start,
+                frame_counts=dict(frame_counts),
+                vram_mb=sample_vram_mb(),
+                rss_mb=sample_rss_mb(),
+            )
+            perf_monitor.write_json(config.perf_json)
+            perf_monitor.print_summary()
 
 
 if __name__ == "__main__":

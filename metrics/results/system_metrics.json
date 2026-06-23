@@ -1,0 +1,9 @@
+{
+  "engines": {
+    "fp32_base":       { "file_mb": 11.0,   "vram_mb": 357 },
+    "fp16_base":       { "file_mb": 6.3,   "vram_mb": 358 },
+    "fp16_decode":     { "file_mb": 6.3, "vram_mb": 402 }
+  },
+  "fleet_size": 5000,
+  "notes": "VRAM measured after loading engine + running 50 inference passes (batch=1, 640x640). Engine sizes on disk in MB."
+}

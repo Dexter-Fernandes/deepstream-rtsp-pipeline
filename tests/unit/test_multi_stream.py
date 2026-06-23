@@ -69,7 +69,7 @@ def test_make_nvinfer_config_rewrites_engine_path(tmp_path):
 
 
 def test_default_tracker_config():
-    assert MultiStreamConfig().tracker_config == "configs/tracker_iou.yml"
+    assert MultiStreamConfig().tracker_config == "configs/tracker_nvdcf.yml"
 
 
 def test_parse_args_tracker_flag():
@@ -78,7 +78,7 @@ def test_parse_args_tracker_flag():
 
 
 def test_parse_args_tracker_default():
-    assert parse_args([]).tracker_config == "configs/tracker_iou.yml"
+    assert parse_args([]).tracker_config == "configs/tracker_nvdcf.yml"
 
 
 def test_yolo_decode_probe_sets_untracked_object_id():
@@ -116,3 +116,68 @@ def test_is_file_uri():
     assert _is_file_uri("data/mot17_04.mp4") is True
     assert _is_file_uri("file:///abs/path/clip.mp4") is True
     assert _is_file_uri("rtsp://localhost:8554/stream0") is False
+
+
+# ---------------------------------------------------------------------------
+# M3.3 — new flag defaults and parsing
+# ---------------------------------------------------------------------------
+
+
+def test_default_perf_json_is_none():
+    assert MultiStreamConfig().perf_json is None
+
+
+def test_default_perf_interval():
+    assert MultiStreamConfig().perf_interval == 5.0
+
+
+def test_default_duration_is_none():
+    assert MultiStreamConfig().duration is None
+
+
+def test_default_no_sync_is_false():
+    assert MultiStreamConfig().no_sync is False
+
+
+def test_parse_args_perf_json():
+    config = parse_args(["--perf-json", "/tmp/perf.json"])
+    assert config.perf_json == "/tmp/perf.json"
+
+
+def test_parse_args_perf_interval():
+    config = parse_args(["--perf-interval", "10"])
+    assert config.perf_interval == 10.0
+
+
+def test_parse_args_duration():
+    config = parse_args(["--duration", "120"])
+    assert config.duration == 120
+
+
+def test_parse_args_no_sync():
+    config = parse_args(["--no-sync"])
+    assert config.no_sync is True
+
+
+def test_run_imports_perf_monitor():
+    import inspect
+    from pipelines.multi_stream import run
+    assert "perf_monitor" in inspect.getsource(run)
+
+
+def test_run_has_frame_counts():
+    import inspect
+    from pipelines.multi_stream import run
+    assert "frame_counts" in inspect.getsource(run)
+
+
+def test_run_uses_timeout_add_seconds():
+    import inspect
+    from pipelines.multi_stream import run
+    assert "timeout_add_seconds" in inspect.getsource(run)
+
+
+def test_build_pipeline_has_no_sync():
+    import inspect
+    from pipelines.multi_stream import build_pipeline
+    assert "sync" in inspect.getsource(build_pipeline)

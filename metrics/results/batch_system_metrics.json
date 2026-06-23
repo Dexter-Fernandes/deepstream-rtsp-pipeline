@@ -1,0 +1,14 @@
+{
+  "idle_vram_mb": 334,
+  "batches": {
+    "1":   { "vram_mb": 1369,   "gpu_util_pct": 99,   "power_w": 81 },
+    "2":   { "vram_mb": 1351,   "gpu_util_pct": 99,   "power_w": 81 },
+    "3":   { "vram_mb": 1357,   "gpu_util_pct": 100,   "power_w": 79 },
+    "15":  { "vram_mb": 1439,  "gpu_util_pct": 100,  "power_w": 78 },
+    "20":  { "vram_mb": 1435,  "gpu_util_pct": 100,  "power_w": 85 },
+    "25":  { "vram_mb": 1459,  "gpu_util_pct": 100,  "power_w": 77 },
+    "33":  { "vram_mb": 1497,  "gpu_util_pct": 100,  "power_w": 90 },
+    "100": { "vram_mb": 1811, "gpu_util_pct": 100, "power_w": 80 }
+  },
+  "notes": "VRAM/util/power are peak values polled at 0.5s intervals during each trtexec run."
+}
