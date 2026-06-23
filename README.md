@@ -4,11 +4,14 @@ NVIDIA DeepStream pipeline running three concurrent RTSP streams through GPU-acc
 
 ## What this demonstrates
 
-- **Multi-stream batching** — three RTSP sources muxed into a single `nvstreammux` (batch-size=3); per-source outputs demuxed back and rendered independently
-- **TDD discipline** — 46 CPU-safe unit tests written before implementation (vertical red→green slices); no GPU required for the test suite
-- **Privacy by design** — anonymisation blur probe wired before `nvdsosd`; detected bbox regions blurred on the NVMM surface before any output leaves the pipeline
-- **Benchmarking pipeline** — per-frame CSV metadata sink; mediamtx RTSP source with MOT17 sequences (MOT17-04 has ground truth for MOTA/HOTA/IDF1 evaluation in M3)
-- **Reproducible environment** — NGC DeepStream 9.0 container + pyds compiled from source; `docker compose up` reproduces the full pipeline
+- Three RTSP sources batched through a single `nvstreammux`, demuxed back per-source for independent OSD and restream output
+- YOLO26n FP16 running end-to-end: `.pt → ONNX (dynamic batch) → TRT FP16` via `trtexec`; Python tensor-meta probe decodes `[300, 6]` output and populates `NvDsObjectMeta` without a compiled C parser
+- `IPluginV2DynamicExt` CUDA kernel appended to the TRT network via TRT Python API; converts xyxy→xywh on GPU inside TRT, replacing the Python coordinate-transform loop; `metrics/profile_decode.py` isolates per-layer latency via `IProfiler`
+- 114 CPU-safe unit tests written before implementation (red→green); no GPU required for the test suite
+- Gaussian blur applied to every detected bbox region before `nvdsosd` renders or any output leaves the pipeline
+- FP32 vs FP16 vs FP16+decode-plugin compared on latency, VRAM, engine size, and fleet OTA cost; batch sweep 1–100 against a 25 fps real-time budget with fleet-sizing projections (`metrics/decode_comparison.ipynb`)
+- Per-frame CSV sink; mediamtx-served MOT17 sequences as the RTSP source (MOT17-04 has ground truth for MOTA/HOTA/IDF1 tracker evaluation)
+- NGC DeepStream 9.0 + pyds compiled from source; `docker compose up` handles model export and conversion on first run
 
 ---
 
@@ -24,7 +27,8 @@ Per-source source bins (× 3):
   rtspsrc → rtph264depay → nvv4l2decoder → queue ──→ nvstreammux.sink_{i}
 
 Shared inference chain (batched, N=3):
-  nvstreammux → nvinfer (TrafficCamNet ResNet-18 FP32)
+  nvstreammux → nvinfer (YOLO26n FP16 + yolo26_decode plugin, network-type=100, output-tensor-meta=1)
+             ← [nvinfer SRC probe: reads xywh tensor → NvDsObjectMeta (80 COCO classes)]
              → nvtracker (NvMultiObjectTracker)
              → nvstreamdemux
 
@@ -49,14 +53,20 @@ mediamtx configs/mediamtx.yml &
 # Build image (first run only — pyds compiled from source, ~5 min)
 docker compose build
 
-# Run pipeline (first run builds TRT batch-3 engine, ~60 s)
+# Run pipeline
+# First run: auto-exports YOLO26n → ONNX (dynamic batch) → FP32 + FP16 TRT engines (max_batch=3), then starts
+# Warm restart: skips all model steps and launches immediately
 docker compose up
 
 # Verify output
 wc -l output_stream{0,1,2}.csv
-ffplay rtsp://localhost:8556/stream0_out   # boxes on stream0
-ffplay rtsp://localhost:8557/stream1_out   # boxes on stream1
-ffplay rtsp://localhost:8558/stream2_out   # boxes on stream2
+ffplay rtsp://localhost:8556/stream0_out   # YOLO26n boxes on stream0
+ffplay rtsp://localhost:8557/stream1_out   # YOLO26n boxes on stream1
+ffplay rtsp://localhost:8558/stream2_out   # YOLO26n boxes on stream2
+
+# Tune detection confidence (default 0.25)
+# Add --conf-threshold 0.5 to the compose command: or run directly:
+# docker run ... ds-pipeline python3 pipelines/multi_stream.py --uri ... --conf-threshold 0.4
 ```
 
 ---
@@ -65,38 +75,93 @@ ffplay rtsp://localhost:8558/stream2_out   # boxes on stream2
 
 ```bash
 pip install pytest
-pytest tests/unit/ -v      # 46 tests, CPU-only, no GPU required
+pytest tests/unit/ -v      # 114 tests, CPU-only, no GPU required
 ```
 
 | Module | Tests | What they cover |
 |--------|-------|-----------------|
 | `metadata_parser` | 6 | `Detection` dataclass, `parse_frame_meta` with fake pyds structs |
 | `csv_sink` | 6 | Header, field values, flush-on-write, multi-detection roundtrip |
-| `anonymisation` | 5 | Blur applied, pixels outside bbox unchanged, out-of-bounds clip |
+| `anonymisation` | 6 | Blur applied, pixels outside bbox unchanged, out-of-bounds clip |
 | `frame_accessor` | 4 | NVMM surface accessor with injectable `_get_surface` |
 | `rtsp_pipeline` | 14 | Config defaults, arg parsing, source props, restream URI parsing |
 | `multi_stream` | 11 | Multi-URI parsing, CSV path routing, port offset, `_make_nvinfer_config` batch-size + engine path rewrite |
+| `convert` | 14 | `engine_path` naming, `build_trtexec_cmd` flags, dynamic-batch shape profile, `parse_args` |
+| `export_yolo26` | 3 | `parse_args` for weights path and output-dir |
+| `init_models` | 9 | Skip/run logic for all cold-start and warm-start combinations; decode-engine skip/build paths |
+| `output_parser` | 6 | Threshold filtering, xyxy→xywh conversion, class_id extraction, batch-dim squeeze |
+| `decode_engine` | 5 | `decode_engine_path` naming, `parse_args` defaults and flags |
+| `validate_accuracy` | 20 | `box_iou`, greedy IoU matching, per-engine comparison, per-coord decode delta, `preprocess_frame` shape/dtype/range |
+| `profile_decode` | 10 | `_parse_tail_latencies` (min/median/p99/max from trtexec output), `budget_check` (mean+p99 vs frame budget), `_SimpleProfiler.to_dict` tail fields |
 
 GPU smoke tests (`pytest --gpu`) are planned for M3.4.
+
+---
+
+## Benchmark results
+
+Standalone TRT engine timings on the GTX 1660 Ti (640×640, `trtexec`, 50 iterations). Full analysis and charts in `metrics/decode_comparison.ipynb`.
+
+| Engine | Inference | Throughput | VRAM | Engine size |
+|--------|-----------|-----------|------|-------------|
+| FP32 base | 4.96 ms | 202 FPS | 357 MB | 11.0 MB |
+| FP16 base | 3.26 ms | 307 FPS | 358 MB | 6.3 MB |
+| FP16 + decode plugin | 3.35 ms | 298 FPS | 402 MB | 6.3 MB |
+
+- **FP16 is 1.52× faster than FP32**, not the often-quoted 2×: the 1660 Ti (Turing, SM 75) has no Tensor Cores, so the gain comes from halved memory bandwidth, not faster compute.
+- **FP16 saves no inference VRAM** (358 vs 357 MB). Weights are a small fraction of the runtime working set; activations dominate. The disk engine is 43% smaller, which matters for OTA fleet updates (≈23 GB saved per 5,000-sensor rollout), not for runtime headroom.
+- **The decode plugin adds ~0.1 ms**, almost all of it kernel-launch overhead rather than compute. YOLO26n is NMS-free and emits only 300 pre-decoded boxes, so the kernel has little to do. M2.6 adds a YOLOv8n plugin (8400 candidates + DFL + NMS) to show where this pattern actually pays off.
+
+**Accuracy validation** — measured across 1,050 frames of MOT17-04-SDP via `metrics/validate_accuracy.py`:
+
+| Comparison | Matched boxes | Mean IoU | Match rate | Max conf delta |
+|---|---|---|---|---|
+| FP16 vs FP32 | 11,690 / 11,804 | **0.9937** | 99.0% | 0.44 |
+
+The 1.52× speedup costs essentially no detection accuracy: 99% of FP32 boxes are matched at IoU > 0.5, mean overlap is 0.994, and the unmatched 1% are low-confidence borderline detections where FP16 rounding shifts a box just below the confidence threshold.
+
+Decode plugin coordinate check (decode engine vs Python baseline, 11,693 matched pairs):
+
+| Stat | Value |
+|---|---|
+| Mean coord delta | **0.041 px** |
+| p99 coord delta | **0.5 px** |
+| Max coord delta | 14.0 px (single outlier from different TRT graph fusions) |
+
+Mean and p99 confirm the CUDA kernel is correct; the 14 px max is a single outlier where the two independently-compiled TRT engines chose different kernel fusions for the same backbone layer, not a kernel arithmetic error.
+
+Multi-stream batch sweep (FP16, single `nvstreammux` batch):
+
+- **batch=15 is the practical ceiling for live RTSP under sustained load** at 29.8 ms mean / 30.8 ms p99, leaving 9 ms of headroom inside the 40 ms / 25 fps budget. batch=20 (40.2 ms mean / 42.0 ms p99) exceeds the budget at the tail. The earlier cold-run figure of batch=25 / 36.2 ms reflects a warmed-up GPU — p99 measurements under sustained sequential load give the operationally accurate number.
+- Consolidating to 15 streams/node cuts a 5,000-camera fleet from 5,000 nodes to 334, a 15× reduction.
+- batch=100 (208 ms) is offline-reprocessing only.
+
+> **Standalone `trtexec` vs full pipeline:** All timings above are pure TRT kernel times. The full DeepStream graph adds scheduling overhead from `nvinfer`, `nvtracker` per-object association, `nvdsosd` composition, RTSP re-stream encode via `nvrtspoutsinkbin`, and GStreamer probe callbacks. These stages share the same 40 ms frame budget, so the 9 ms headroom at batch=15 is a ceiling on what the rest of the pipeline has to fit into. Measured end-to-end FPS for the live 3-stream pipeline is deferred to M3.3.
 
 ---
 
 ## Roadmap
 
 **M1 — Pipeline Plumbing** ✓ *(complete)*
-Three-stream concurrent pipeline; TrafficCamNet ResNet-18 FP32 placeholder; per-source CSV; anonymisation probe; RTSP restream; 46 unit tests.
+Three-stream concurrent pipeline; TrafficCamNet ResNet-18 FP32 placeholder; per-source CSV; anonymisation probe; RTSP restream; 47 unit tests.
 
 **M2 — Custom Model + C++ Decode Plugin** *(in progress)*
-Export YOLOv8n → ONNX → TensorRT FP32/FP16; C++ `IPluginV2DynamicExt` GPU decode plugin replacing the CPU ONNX NMS path (`plugins/yolov8_decode/`); FP32 vs FP16+plugin latency comparison report.
+YOLO26n FP16 runs end-to-end through DeepStream with a C++ TRT decode plugin. The `IPluginV2DynamicExt` CUDA kernel does the xyxy→xywh coordinate transform on GPU inside TRT; `models/decode_engine.py` builds the plugin-appended engine via TRT Python API. Precision comparison, multi-stream batch sweep (up to 100 streams), accuracy validation against a FP32 baseline, and latency-tail analysis (p99, jitter) are all complete; 114 unit tests. Remaining: M2.6 YOLOv8n heavy-decode plugin (deferrable — M3 tracker work takes priority).
 
 **M3 — Tracker Comparison + Hardening** *(planned)*
-Three-way tracker comparison (IOU → NvDCF → ByteTrack) with MOTA/HOTA/IDF1 on MOT17-04 ground truth; 30-minute stability run; GPU smoke + integration tests; `docs/jetson-upgrade.md`, `docs/isp-and-camera-input.md`, `docs/system-design.md`.
+Three-way tracker comparison (IOU → NvDCF → ByteTrack) with MOTA/HOTA/IDF1 on MOT17-04 ground truth; live end-to-end pipeline FPS + 30-minute stability run; GPU smoke + integration tests; MLOps model-promotion gate (accuracy regression check before fleet rollout); observability + reactive-debugging tooling; `docs/jetson-upgrade.md`, `docs/isp-and-camera-input.md`, `docs/system-design.md`.
 
 ---
 
 ## Key design decisions
 
-**`_make_nvinfer_config` for TRT batch-size.** `nvinfer.set_property("batch-size", n)` overrides the config but does not trigger an engine rebuild — the cached batch-1 engine gives undefined behaviour at batch-3. The fix rewrites both `batch-size` and the engine file path in a temp config, forcing nvinfer to build a correctly-sized engine on first run and cache it thereafter.
+**`network-type=100` + Python tensor-meta probe for YOLO26n.** nvinfer's built-in bbox parsers expect anchor-based or NMS-post-processed output in a specific layout. YOLO26n's one-to-one matching head emits `[batch, 300, 6]` (end-to-end NMS baked in). Rather than compile a C `.so` custom parser, we use `network-type=100` (custom) with `output-tensor-meta=1`: nvinfer exposes the raw tensor in `NvDsInferTensorMeta` and a Python probe on the nvinfer SRC pad calls `parse_yolo26_output()` and populates `NvDsObjectMeta` directly. The decode logic stays in pure Python, is fully unit-testable without a GPU, and will be replaced by a C++ CUDA kernel in M2.3.
+
+**Dynamic-batch ONNX export.** Exporting with `dynamic=True` makes the batch dimension flexible. `trtexec` is then called with `--minShapes=images:1x3x640x640 --optShapes=images:3x3x640x640 --maxShapes=images:3x3x640x640`, producing a single engine file (`yolo26n_fp16_b3.engine`) that nvinfer can use for any batch size in [1, 3] — both single-stream testing and 3-stream production use the same engine.
+
+**C++ `IPluginV2DynamicExt` decode plugin — xyxy→xywh on GPU.** The M2.2 Python probe looped over 300 detections on CPU to convert xyxy → xywh. M2.3+M2.4 replace this with a CUDA kernel (`plugins/yolo26_decode/yolo26_decode_kernel.cu`) compiled as a TRT `IPluginV2DynamicExt` plugin. `models/decode_engine.py` uses the TRT Python API to parse the ONNX, unmark the YOLO output, append the plugin as a custom layer, and rebuild the engine — the resulting `yolo26n_fp16_b3_decode.engine` emits xywh from TRT directly. The probe reads the transformed coordinates with no Python for-loop. `metrics/profile_decode.py` uses TRT `IProfiler` to print per-layer latency and isolate the `yolo26_decode` kernel time.
+
+**`_make_nvinfer_config` for TRT batch-size (legacy engines).** `nvinfer.set_property("batch-size", n)` overrides the config but does not trigger an engine rebuild — a cached batch-1 engine gives undefined behaviour at batch-3. The fix rewrites both `batch-size` and the engine file path in a temp config. For YOLO26n the engine already covers batch 1–3, so only `batch-size` is rewritten; the path is left unchanged.
 
 **Per-branch `nvdsosd` after demux.** A single batched OSD only composites onto the first frame in the batch (source 0). Each branch gets its own `nvvideoconvert(unified) → nvdsosd` so boxes render correctly on every stream.
 
@@ -113,15 +178,15 @@ Three-way tracker comparison (IOU → NvDCF → ByteTrack) with MOTA/HOTA/IDF1 o
 | Jetson / nvargus | No Jetson hardware available | `docs/jetson-upgrade.md` (M3.5) — component diff table: x86 dGPU → JetPack |
 | INT8 quantisation | GTX 1660Ti has no Tensor Cores; INT8 has no hardware speedup | Documented in `models/convert.py`; would enable on Jetson AGX Orin or RTX-class GPU |
 | GPU smoke tests | Require GPU runner; written last to avoid slow CI | Planned M3.4 via `pytest --gpu` and `tests/smoke/` |
-| FP32 baseline metrics | Live benchmark not yet captured | M1.6 open tick: 60-second `nvidia-smi dmon` run on stream0 |
+| Decode plugin shows little gain on YOLO26n | YOLO26n is NMS-free (300 pre-decoded boxes), so the kernel does ~0.006 ms of work; the accuracy comparison is between two separately-compiled TRT graphs, not a controlled kernel isolation | M2.6: YOLOv8n plugin (8,400 candidates + DFL + NMS) demonstrates where the pattern pays off |
 | DeepSORT tracker | Re-ID model exceeds 6 GB VRAM ceiling | Documented in M3 tracker comparison rationale; ByteTrack recommended instead |
 
 ---
 
 ## Privacy by Design
 
-The pipeline applies Gaussian blur to every detected bounding-box region before frames reach any output sink. This is implemented as a GStreamer buffer probe on each per-source `nvdsosd_{i}` sink pad (`pipelines/multi_stream.py`), calling `blur_bboxes()` (`pipelines/anonymisation.py`) on the raw `NvBufSurface`-backed numpy array for each frame.
+The pipeline blurs every detected bounding-box region before frames reach any output sink. A GStreamer buffer probe on each per-source `nvdsosd_{i}` sink pad calls `blur_bboxes()` (`pipelines/anonymisation.py`) on the raw `NvBufSurface`-backed numpy array for each frame.
 
-Blurring runs *before* `nvdsosd` renders the overlay boxes, so anonymised pixels are written back into the GPU surface and any downstream consumer (display or encode) sees the blurred content. No raw face or licence-plate pixel data is written to the CSV metadata sink — only bounding-box coordinates, class labels, object IDs, and confidence scores are persisted.
+Blurring runs *before* `nvdsosd` renders the overlay boxes, so anonymised pixels are written back into the GPU surface and any downstream consumer (display or encode) sees the blurred content. The CSV metadata sink stores only bounding-box coordinates, class labels, object IDs, and confidence scores — no raw face or licence-plate pixel data.
 
-`blur_bboxes()` clips all coordinates to the frame boundary and skips zero-area regions, so out-of-range detections are handled safely without crashing the pipeline.
+`blur_bboxes()` clips coordinates to the frame boundary and skips zero-area regions, so out-of-range detections are handled safely without crashing the pipeline.

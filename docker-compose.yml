@@ -1,5 +1,7 @@
 x-pipeline: &pipeline-base
-  build: docker/
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
   image: ds-pipeline
   network_mode: host
   volumes:
