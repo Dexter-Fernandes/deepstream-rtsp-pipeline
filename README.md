@@ -7,7 +7,7 @@ NVIDIA DeepStream pipeline running three concurrent RTSP streams through GPU-acc
 - **Multi-stream batching** — three RTSP sources muxed into a single `nvstreammux` (batch-size=3); per-source outputs demuxed back and rendered independently
 - **Custom model integration** — YOLO26n FP16 running end-to-end: `.pt → ONNX (dynamic batch) → TRT FP16` via `trtexec`; Python tensor-meta probe decodes `[300, 6]` output and populates `NvDsObjectMeta` without a compiled C parser
 - **C++ TRT plugin** — `IPluginV2DynamicExt` CUDA kernel (`plugins/yolo26_decode/`) appended to the TRT network via TRT Python API; converts xyxy→xywh on GPU inside TRT, replacing the Python coordinate-transform loop; `metrics/profile_decode.py` isolates per-layer latency via `IProfiler`
-- **TDD discipline** — 104 CPU-safe unit tests written before implementation (vertical red→green slices); no GPU required for the test suite
+- **TDD discipline** — 114 CPU-safe unit tests written before implementation (vertical red→green slices); no GPU required for the test suite
 - **Privacy by design** — anonymisation blur probe wired before `nvdsosd`; detected bbox regions blurred on the NVMM surface before any output leaves the pipeline
 - **Edge benchmarking** — FP32 vs FP16 vs FP16+decode-plugin compared on latency, VRAM, engine size, and fleet OTA cost; multi-stream batch sweep (1–100) against a 25 fps real-time budget with a fleet-sizing projection (`metrics/decode_comparison.ipynb`)
 - **Benchmarking pipeline** — per-frame CSV metadata sink; mediamtx RTSP source with MOT17 sequences (MOT17-04 has ground truth for MOTA/HOTA/IDF1 evaluation in M3)
@@ -75,7 +75,7 @@ ffplay rtsp://localhost:8558/stream2_out   # YOLO26n boxes on stream2
 
 ```bash
 pip install pytest
-pytest tests/unit/ -v      # 104 tests, CPU-only, no GPU required
+pytest tests/unit/ -v      # 114 tests, CPU-only, no GPU required
 ```
 
 | Module | Tests | What they cover |
@@ -92,6 +92,7 @@ pytest tests/unit/ -v      # 104 tests, CPU-only, no GPU required
 | `output_parser` | 6 | Threshold filtering, xyxy→xywh conversion, class_id extraction, batch-dim squeeze |
 | `decode_engine` | 5 | `decode_engine_path` naming, `parse_args` defaults and flags |
 | `validate_accuracy` | 20 | `box_iou`, greedy IoU matching, per-engine comparison, per-coord decode delta, `preprocess_frame` shape/dtype/range |
+| `profile_decode` | 10 | `_parse_tail_latencies` (min/median/p99/max from trtexec output), `budget_check` (mean+p99 vs frame budget), `_SimpleProfiler.to_dict` tail fields |
 
 GPU smoke tests (`pytest --gpu`) are planned for M3.4.
 
@@ -131,9 +132,9 @@ Mean and p99 confirm the CUDA kernel is correct; the 14 px max is a single outli
 
 Multi-stream batch sweep (FP16, single `nvstreammux` batch):
 
-- **batch=25 is the practical ceiling for live RTSP** at 36.2 ms, inside the 40 ms / 25 fps budget. batch=33 (47.7 ms) falls below real-time.
-- Consolidating to 25 streams/node cuts a 5,000-camera fleet from 5,000 nodes to 200, a 25× reduction.
-- batch=100 (144 ms) is offline-reprocessing only.
+- **batch=15 is the practical ceiling for live RTSP under sustained load** at 29.8 ms mean / 30.8 ms p99, leaving 9 ms of headroom inside the 40 ms / 25 fps budget. batch=20 (40.2 ms mean / 42.0 ms p99) exceeds the budget at the tail. The earlier cold-run figure of batch=25 / 36.2 ms reflects a warmed-up GPU — p99 measurements under sustained sequential load give the operationally accurate number.
+- Consolidating to 15 streams/node cuts a 5,000-camera fleet from 5,000 nodes to 334, a 15× reduction.
+- batch=100 (208 ms) is offline-reprocessing only.
 
 ---
 
@@ -143,7 +144,7 @@ Multi-stream batch sweep (FP16, single `nvstreammux` batch):
 Three-stream concurrent pipeline; TrafficCamNet ResNet-18 FP32 placeholder; per-source CSV; anonymisation probe; RTSP restream; 47 unit tests.
 
 **M2 — Custom Model + C++ Decode Plugin** *(in progress — M2.1–M2.5 + M2.7.1 complete)*
-YOLO26n FP16 running end-to-end through DeepStream with a C++ TRT decode plugin: `.pt → ONNX (dynamic batch) → TRT FP16 (batch 1–3)` via `trtexec`; `IPluginV2DynamicExt` CUDA kernel (`plugins/yolo26_decode/`) converts xyxy→xywh on GPU inside TRT and is appended to the network via TRT Python API (`models/decode_engine.py` → `yolo26n_fp16_b3_decode.engine`); probe reads pre-transformed xywh tensor directly; `metrics/profile_decode.py` with TRT `IProfiler` isolates decode step latency. M2.5 precision/multi-stream/fleet comparison report and M2.7.1 accuracy validation complete (see Benchmark results above); 104 unit tests total. Remaining: M2.6 YOLOv8n heavy-decode plugin (deferrable), M2.7.2/M2.7.3 latency-tail analysis.
+YOLO26n FP16 running end-to-end through DeepStream with a C++ TRT decode plugin: `.pt → ONNX (dynamic batch) → TRT FP16 (batch 1–3)` via `trtexec`; `IPluginV2DynamicExt` CUDA kernel (`plugins/yolo26_decode/`) converts xyxy→xywh on GPU inside TRT and is appended to the network via TRT Python API (`models/decode_engine.py` → `yolo26n_fp16_b3_decode.engine`); probe reads pre-transformed xywh tensor directly; `metrics/profile_decode.py` with TRT `IProfiler` isolates decode step latency. M2.5 precision/multi-stream/fleet comparison, M2.7.1 accuracy validation, and M2.7.2 tail-latency parser complete (see Benchmark results above); 114 unit tests total. Remaining: M2.6 YOLOv8n heavy-decode plugin (deferrable), M2.7.2 container re-run to populate p99/jitter numbers, M2.7.3 end-to-end framing.
 
 **M3 — Tracker Comparison + Hardening** *(planned)*
 Three-way tracker comparison (IOU → NvDCF → ByteTrack) with MOTA/HOTA/IDF1 on MOT17-04 ground truth; live end-to-end pipeline FPS + 30-minute stability run; GPU smoke + integration tests; MLOps model-promotion gate (accuracy regression check before fleet rollout); observability + reactive-debugging tooling; `docs/jetson-upgrade.md`, `docs/isp-and-camera-input.md`, `docs/system-design.md`.

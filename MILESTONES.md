@@ -143,10 +143,10 @@
 - [x] Add accuracy summary cell to `metrics/decode_comparison.ipynb`; reframe headline as "FP16 = 1.52× faster at <X> box IoU / negligible mAP delta"
 
 ### M2.7.2 — Latency tails (p50 / p99 / max)
-- [ ] Extend `metrics/profile_decode.py` parser: capture `median` and `percentile(99%)` / `max` from trtexec output (already printed; only `mean` is parsed today)
-- [ ] Persist tail latencies to `metrics/results/*.json`; re-run `batch_bench.sh` inside container
-- [ ] Add jitter column + p99-vs-budget check to the throughput table — a node averaging 36 ms but spiking past 40 ms at p99 drops frames
-- [ ] Note in commentary: real-time budget is violated by the tail, not the mean
+- [x] Extend `metrics/profile_decode.py` parser: capture `median` and `percentile(99%)` / `max` from trtexec output — `_parse_tail_latencies()` + `budget_check()` (10 new unit tests; 114 total)
+- [x] Persist tail latencies to `metrics/results/*.json`; re-run `batch_bench.sh` inside container — batch=15 confirmed as sustained real-time ceiling (29.76ms mean / 30.80ms p99); batch=20 at p99=41.97ms is over budget
+- [x] Add jitter column + p99-vs-budget check to the throughput table — `decode_comparison.ipynb` cells added after multi-stream section; code handles old JSON gracefully
+- [x] Note in commentary: real-time budget is violated by the tail, not the mean
 
 ### M2.7.3 — End-to-end pipeline framing
 - [ ] Add a note distinguishing standalone `trtexec` numbers from full DeepStream throughput (`nvinfer` + `nvtracker` + OSD + re-stream consume the 3.8 ms headroom); defer measured end-to-end FPS to M3.3
@@ -163,7 +163,7 @@
 - [ ] Write `configs/tracker_nvdcf.yml` (NvDCF config)
 - [ ] Write `configs/tracker_bytetrack.yml` (ByteTrack config)
 - [ ] Add `--tracker` CLI flag to `pipelines/rtsp.py` to swap configs without code change
-- [ ] Run each tracker on MOT17-04 for 60 seconds; save separate CSV per tracker
+- [ ] Run each tracker on MOT17-04 on all frames; save separate CSV per tracker
 
 ### M3.2 — Tracker Metrics (py-motmetrics)
 - [ ] Install `py-motmetrics` in container

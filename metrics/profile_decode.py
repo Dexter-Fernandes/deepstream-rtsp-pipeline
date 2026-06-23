@@ -75,6 +75,53 @@ def _parse_mean_latency(output: str) -> float:
     return 0.0
 
 
+def _parse_tail_latencies(output: str) -> dict:
+    """Extract min/median/p99/max latencies (ms) from trtexec stdout/stderr.
+
+    Returns a dict with keys min_ms, median_ms, p99_ms, max_ms; all 0.0 if
+    the corresponding values are not found in the output.
+    """
+    result = {"min_ms": 0.0, "median_ms": 0.0, "p99_ms": 0.0, "max_ms": 0.0}
+    m = re.search(r"\bmin\s*=\s*([\d.]+)\s*ms", output, re.IGNORECASE)
+    if m:
+        result["min_ms"] = float(m.group(1))
+    m = re.search(r"\bmax\s*=\s*([\d.]+)\s*ms", output, re.IGNORECASE)
+    if m:
+        result["max_ms"] = float(m.group(1))
+    m = re.search(r"\bmedian\s*=\s*([\d.]+)\s*ms", output, re.IGNORECASE)
+    if m:
+        result["median_ms"] = float(m.group(1))
+    m = re.search(r"percentile\(99%\)\s*=\s*([\d.]+)\s*ms", output, re.IGNORECASE)
+    if m:
+        result["p99_ms"] = float(m.group(1))
+    return result
+
+
+def budget_check(result: dict, budget_ms: float = 40.0) -> dict:
+    """Check whether mean and p99 latency fit inside a real-time frame budget.
+
+    The real-time constraint is violated by the tail, not the mean: a batch
+    that averages 36 ms but spikes to 42 ms at p99 will drop frames on 1% of
+    invocations. Use this to surface that gap explicitly.
+
+    Args:
+        result: dict returned by _SimpleProfiler.to_dict (must have wall_ms;
+                p99_ms is optional — falls back to wall_ms if absent or zero).
+        budget_ms: frame budget in milliseconds (default 40 ms = 25 fps).
+
+    Returns dict with mean_ms, p99_ms, budget_ms, mean_ok, p99_ok.
+    """
+    mean_ms = result.get("wall_ms", 0.0)
+    p99_ms = result.get("p99_ms") or mean_ms
+    return {
+        "budget_ms": budget_ms,
+        "mean_ms": round(mean_ms, 4),
+        "p99_ms": round(p99_ms, 4),
+        "mean_ok": mean_ms <= budget_ms,
+        "p99_ok": p99_ms <= budget_ms,
+    }
+
+
 def _parse_layer_profile(profile_path: Path) -> dict[str, float]:
     """Parse trtexec --exportProfile JSON → {layer_name: avg_ms}."""
     data = json.loads(profile_path.read_text())
@@ -93,20 +140,33 @@ def _parse_layer_profile(profile_path: Path) -> dict[str, float]:
 # Profiler class (for programmatic use)
 # ---------------------------------------------------------------------------
 
+_ZERO_TAIL: dict[str, float] = {"min_ms": 0.0, "median_ms": 0.0, "p99_ms": 0.0, "max_ms": 0.0}
+
+
 class _SimpleProfiler:
     """Thin wrapper around trtexec profiling results."""
 
-    def __init__(self, layers: dict[str, float], wall_ms: float):
+    def __init__(
+        self,
+        layers: dict[str, float],
+        wall_ms: float,
+        tail: dict | None = None,
+    ):
         self.layers = layers
         self.wall_ms = wall_ms
+        self.tail: dict[str, float] = tail if tail is not None else dict(_ZERO_TAIL)
 
     def to_dict(self, label: str | None, engine_path: Path, batch: int = 1) -> dict:
         total_fps = round(1000.0 * batch / self.wall_ms, 2) if self.wall_ms > 0 else 0
         return {
-            "label": label or engine_path.name,
-            "engine": str(engine_path),
+            "label": label or (engine_path.name if engine_path else "unknown"),
+            "engine": str(engine_path) if engine_path else "",
             "batch": batch,
             "wall_ms": round(self.wall_ms, 4),
+            "min_ms": round(self.tail.get("min_ms", 0.0), 4),
+            "median_ms": round(self.tail.get("median_ms", 0.0), 4),
+            "p99_ms": round(self.tail.get("p99_ms", 0.0), 4),
+            "max_ms": round(self.tail.get("max_ms", 0.0), 4),
             "fps": total_fps,
             "fps_per_stream": round(total_fps / batch, 2) if batch > 0 else 0,
             "layers": self.layers,
@@ -131,6 +191,14 @@ class _SimpleProfiler:
         print(f"{'─' * (col_w + 22)}")
         print(f"  {'TOTAL':<{col_w}}  {total:8.3f}")
         print(f"{'─' * (col_w + 22)}\n")
+        if self.tail.get("p99_ms", 0.0) > 0:
+            print(
+                f"  Latency tails:  "
+                f"min={self.tail['min_ms']:.3f}  "
+                f"median={self.tail['median_ms']:.3f}  "
+                f"p99={self.tail['p99_ms']:.3f}  "
+                f"max={self.tail['max_ms']:.3f}  ms\n"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +226,7 @@ def profile_engine(
         "--warmUp=2000",           # 2 s warmup (ms, not iterations)
         "--profilingVerbosity=detailed",
         f"--exportProfile={profile_json}",
+        "--separateProfileRun",    # keeps the Latency:/percentile summary visible
     ]
     if plugin_lib is not None:
         cmd.append(f"--plugins={plugin_lib}")
@@ -173,17 +242,24 @@ def profile_engine(
         raise RuntimeError(f"trtexec failed (exit {proc.returncode})")
 
     wall_ms = _parse_mean_latency(output)
+    tail    = _parse_tail_latencies(output)
     layers  = _parse_layer_profile(profile_json) if profile_json.exists() else {}
     profile_json.unlink(missing_ok=True)
     # If trtexec output format didn't match any regex, sum layer times as proxy
     if wall_ms == 0.0 and layers:
         wall_ms = round(sum(layers.values()), 4)
 
-    profiler = _SimpleProfiler(layers, wall_ms)
+    profiler = _SimpleProfiler(layers, wall_ms, tail=tail)
     profiler.print_report(title=f"{label or engine_path.name} (batch={batch}, {n_runs} runs)")
     if wall_ms > 0:
         total_fps = 1000.0 * batch / wall_ms
-        print(f"  Wall time per batch:     {wall_ms:.2f} ms")
+        print(f"  Wall time (mean):        {wall_ms:.2f} ms")
+        if tail.get("p99_ms", 0.0) > 0:
+            print(
+                f"  Tail latencies:          "
+                f"min={tail['min_ms']:.2f}  median={tail['median_ms']:.2f}  "
+                f"p99={tail['p99_ms']:.2f}  max={tail['max_ms']:.2f}  ms"
+            )
         print(f"  Total throughput:        {total_fps:.1f} FPS")
         if batch > 1:
             print(f"  Per-stream throughput:   {total_fps/batch:.1f} FPS/stream\n")
