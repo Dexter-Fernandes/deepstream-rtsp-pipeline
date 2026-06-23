@@ -100,12 +100,15 @@ class _SimpleProfiler:
         self.layers = layers
         self.wall_ms = wall_ms
 
-    def to_dict(self, label: str | None, engine_path: Path) -> dict:
+    def to_dict(self, label: str | None, engine_path: Path, batch: int = 1) -> dict:
+        total_fps = round(1000.0 * batch / self.wall_ms, 2) if self.wall_ms > 0 else 0
         return {
             "label": label or engine_path.name,
             "engine": str(engine_path),
+            "batch": batch,
             "wall_ms": round(self.wall_ms, 4),
-            "fps": round(1000.0 / self.wall_ms, 2) if self.wall_ms > 0 else 0,
+            "fps": total_fps,
+            "fps_per_stream": round(total_fps / batch, 2) if batch > 0 else 0,
             "layers": self.layers,
         }
 
@@ -141,6 +144,7 @@ def profile_engine(
     n_warmup: int = 5,
     n_runs: int = 50,
     save_json: Path | None = None,
+    batch: int = 1,
 ) -> dict:
     trtexec = _find_trtexec()
 
@@ -157,6 +161,8 @@ def profile_engine(
     ]
     if plugin_lib is not None:
         cmd.append(f"--plugins={plugin_lib}")
+    if batch > 1:
+        cmd.append(f"--shapes=images:{batch}x3x640x640")
 
     print(f"[profiler] Running: {' '.join(cmd)}")
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -174,11 +180,17 @@ def profile_engine(
         wall_ms = round(sum(layers.values()), 4)
 
     profiler = _SimpleProfiler(layers, wall_ms)
-    profiler.print_report(title=f"{label or engine_path.name} ({n_runs} runs)")
+    profiler.print_report(title=f"{label or engine_path.name} (batch={batch}, {n_runs} runs)")
     if wall_ms > 0:
-        print(f"  Wall time per inference: {wall_ms:.2f} ms  ({1000/wall_ms:.1f} FPS)\n")
+        total_fps = 1000.0 * batch / wall_ms
+        print(f"  Wall time per batch:     {wall_ms:.2f} ms")
+        print(f"  Total throughput:        {total_fps:.1f} FPS")
+        if batch > 1:
+            print(f"  Per-stream throughput:   {total_fps/batch:.1f} FPS/stream\n")
+        else:
+            print()
 
-    result = profiler.to_dict(label, engine_path)
+    result = profiler.to_dict(label, engine_path, batch=batch)
 
     if save_json is not None:
         save_json.parent.mkdir(parents=True, exist_ok=True)
@@ -223,6 +235,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--n-warmup", type=int, default=5,  dest="n_warmup",
                         help="Ignored (warmup is time-based in trtexec; kept for API compat)")
     parser.add_argument("--n-runs",   type=int, default=50, dest="n_runs")
+    parser.add_argument(
+        "--batch",
+        type=int,
+        default=1,
+        help="Batch size (simulates N concurrent streams). Sets trtexec --shapes=images:Nx3x640x640",
+    )
     return parser.parse_args(argv)
 
 
@@ -235,4 +253,5 @@ if __name__ == "__main__":
         n_warmup=args.n_warmup,
         n_runs=args.n_runs,
         save_json=args.save_json,
+        batch=args.batch,
     )

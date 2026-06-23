@@ -40,7 +40,7 @@
 ### M1.6 — Stream Validation
 - [x] Run pipeline against `stream0` (MOT17-04), `stream1` (MOT17-13), `stream2` (MOT17-02) in sequence; confirm CSV populated for each
 - [x] Confirm clean EOS and pipeline teardown on stream end for each
-- [ ] Record FP32 baseline: frames processed, mean FPS, peak VRAM (`nvidia-smi dmon`) on stream0 for 60 seconds
+- [x] Record FP32 baseline: frames processed, mean FPS, peak VRAM (`nvidia-smi dmon`) on stream0 for 60 seconds
 
 ### M1.7 — Anonymisation Write-back + RTSP Re-stream
 - [x] Add `nvvideoconvert` CPU-copy path or CUDA memcpy to map NVMM frame to host before blurring — `pipelines/frame_accessor.py` (`get_frame_rgba`/`write_frame_rgba`) with injectable `_get_surface` for unit testing (4 tests)
@@ -61,7 +61,7 @@
 
 ## M2 — Custom Model + C++ Decode Plugin
 
-**Exit criteria:** YOLO26n running through DeepStream at FP16 with stable ByteTrack IDs; C++ decode plugin built and benchmarked.
+**Exit criteria:** YOLO26n running through DeepStream at FP16; C++ decode plugin built, benchmarked, and validated against the Python-decode baseline; precision/decode comparison report (FP32 vs FP16 vs +decode) with accuracy and latency-tail analysis. (Tracker/ByteTrack work moved to M3.1.)
 
 ### M2.1 — YOLO26n Export ✓
 - [x] Install `ultralytics` in container (`docker/Dockerfile`)
@@ -98,6 +98,59 @@
 - [x] `metrics/profile_decode.py` updated: `--plugin-lib` optional (omit for base engines), `--save-json`, `--label`, `_SimpleProfiler.to_dict()` — profiles any engine without requiring the decode plugin
 - [x] `metrics/benchmark_engines.sh`: one-shot script run inside container; profiles FP32, FP16, and FP16+decode engines; captures VRAM via `nvidia-smi`; writes engine file sizes; saves all to `metrics/results/*.json`
 - [x] `metrics/decode_comparison.ipynb`: edge-constraint summary table (inference ms, FPS, VRAM MB, engine MB, OTA fleet payload); FP32→FP16 latency/FPS bar charts; per-layer grouped bar chart with decode kernel annotated; VRAM efficiency section; fleet OTA impact (5,000 sensors); honest commentary on decode kernel overhead and when the pattern pays off
+- [x] Multi-stream throughput section: profiled FP16 engine at batch 1/2/3/25/33/100 via `metrics/batch_bench.sh` (`yolo26n_fp16_b100.engine`); per-stream FPS vs 25 fps real-time floor; VRAM + GPU-util curves; finding: batch=25 is the practical ceiling (36.2 ms, inside the 40 ms budget), batch=33 falls below real-time
+- [x] Fleet projection section: edge-node count for 500 / 5,000-camera fleets across batch sizes; 25× node reduction at batch=25; batch=100 framed as offline-reprocessing-only
+
+---
+
+## M2.6 — YOLOv8n Decode Plugin (heavy-decode contrast)
+
+> **Priority: deferrable.** This is the highest-effort item in the project (a DFL+NMS CUDA kernel) and is a *deepening* of the decode-plugin story, not a JD-central deliverable. The role-central tracker comparison (M3.1/M3.2, `nvtracker` + MOTA/HOTA) should land first. Recommended: do M3.1–M3.2 before this, and treat M2.6 as "do-if-time" — it blocks nothing (M2.7 runs on YOLO26n alone if M2.6 hasn't been built).
+
+**Exit criteria:** a second decode plugin on an **anchor-based, NMS-required** model where the kernel does real work, turning the M2.5 "when does this pattern pay off" argument from hypothetical into measured. The story: YOLO26n's NMS-free head makes a decode kernel pointless (0.006 ms); YOLOv8n's `[1, 84, 8400]` raw output with DFL + NMS over 8400 candidates is exactly where moving decode onto the GPU saves real latency vs copying to host and looping in Python.
+
+**Why YOLOv8n:** anchor-free but **not** NMS-free. Raw head output is 8400 candidate boxes (vs YOLO26n's 300 pre-decoded), requiring DFL box decode, anchor/stride coordinate transform, score-threshold filtering, and NMS — ~28× more candidates plus the NMS step. This is a decode block worth putting on the GPU.
+
+### M2.6.1 — Export + baseline (Python decode)
+- [ ] `models/export_yolov8.py` — export `yolov8n.pt` → ONNX with **raw head output** (un-decoded, no embedded NMS) so the plugin owns the full decode; dynamic batch
+- [ ] Convert to FP16 TRT engine via existing `models/convert.py` (`--max-batch`); confirm raw output shape `[1, 144, 8400]` (64 box-distribution + 80 class) or document the actual exported shape
+- [ ] `models/yolov8_output_parser.py` — Python reference decode (DFL softmax → xywh, anchor/stride, score threshold, NMS); TDD, the correctness oracle for the kernel
+- [ ] Wire Python-decode probe path so YOLOv8n runs end-to-end (baseline before the plugin)
+
+### M2.6.2 — CUDA decode plugin
+- [ ] Scaffold `plugins/yolov8_decode/` (`CMakeLists.txt`, SM 75) mirroring `yolo26_decode/`
+- [ ] `IPluginV2DynamicExt`: `getOutputDimensions` (8400 candidates → top-N detections), `enqueue`, `serialize`
+- [ ] CUDA kernel: DFL softmax + box decode, anchor/stride transform, score-threshold filter, NMS (this is the heavy part the YOLO26n kernel never had)
+- [ ] Build `.so`: `cmake -B build -DCMAKE_CUDA_ARCHITECTURES=75 && cmake --build build` inside container
+- [ ] `models/decode_engine.py` (or a parallel builder): append plugin after YOLOv8n raw output → `yolov8n_fp16_b3_decode.engine`
+- [ ] `docker/init_models.py`: build YOLOv8n decode engine if `libyolov8_decode.so` present; skip-with-warning otherwise; unit tests
+
+### M2.6.3 — Benchmark + accuracy + notebook
+- [ ] Profile via `metrics/profile_decode.py`: YOLOv8n Python-decode vs plugin-decode; the kernel's `enqueue` should now show a **non-trivial** latency the YOLO26n kernel never did
+- [ ] Accuracy: assert plugin detections match the Python reference within float epsilon (box IoU + class agreement); formalised by the shared harness in M2.7.1, which validates both decode plugins
+- [ ] Add YOLOv8n columns/section to the decode notebook: side-by-side decode-block latency for YOLO26n (negligible) vs YOLOv8n (measured saving) — the concrete "this is when you write a custom kernel" payoff
+
+---
+
+## M2.7 — Accuracy Validation + Real-Time Latency
+
+**Exit criteria:** numerical proof that FP16 and the YOLO26n decode plugin preserve detections vs the FP32 baseline; latency reported as tail percentiles (p50/p99/max) not just mean, so the real-time frame-budget story reflects worst-case behaviour. (If M2.6 is done, the YOLOv8n plugin is validated by the same harness; if deferred, this milestone runs on YOLO26n alone and blocks nothing.)
+
+### M2.7.1 — Accuracy / correctness validation
+- [ ] New validation script (shared harness): run FP32, FP16, and FP16+decode engines on a fixed set of MOT17 frames; persist detections per engine
+- [ ] FP16 vs FP32 box agreement: mean IoU of matched boxes, dropped/added detection counts, max confidence delta → confirm the 1.52× speedup costs ~0 accuracy
+- [ ] Decode-plugin vs Python-decode (YOLO26n; YOLOv8n too if M2.6 is built): assert coordinates match within float epsilon (closes the M2.4 "match Python-decode baseline" item with numbers, not a visual check; covers the M2.6.3 YOLOv8n check when applicable)
+- [ ] Add accuracy summary cell to `metrics/decode_comparison.ipynb`; reframe headline as "FP16 = 1.52× faster at <X> box IoU / negligible mAP delta"
+
+### M2.7.2 — Latency tails (p50 / p99 / max)
+- [ ] Extend `metrics/profile_decode.py` parser: capture `median` and `percentile(99%)` / `max` from trtexec output (already printed; only `mean` is parsed today)
+- [ ] Persist tail latencies to `metrics/results/*.json`; re-run `batch_bench.sh` inside container
+- [ ] Add jitter column + p99-vs-budget check to the throughput table — a node averaging 36 ms but spiking past 40 ms at p99 drops frames
+- [ ] Note in commentary: real-time budget is violated by the tail, not the mean
+
+### M2.7.3 — End-to-end pipeline framing
+- [ ] Add a note distinguishing standalone `trtexec` numbers from full DeepStream throughput (`nvinfer` + `nvtracker` + OSD + re-stream consume the 3.8 ms headroom); defer measured end-to-end FPS to M3.3
+- [ ] INT8 as a third precision point deferred — see Stretch Goals (1660 Ti has no Tensor Cores; INT8 via DP4A possible but accuracy/speed trade-off better shown on RTX/Jetson)
 
 ---
 
@@ -118,22 +171,32 @@
 - [ ] Add no-GT metrics: parse CSV for ID switches, track fragmentation, mean FPS, peak VRAM
 - [ ] Produce `metrics/tracker_comparison.ipynb` with full comparison table
 
-### M3.3 — Multi-Stream Benchmarking
-- [ ] 30-minute stability run on all three streams; confirm no crash/memory leak
-- [ ] Record per-stream FPS and aggregate VRAM during 3-stream load
-- [ ] Document throughput degradation curve (1→2→3 streams) in README
+### M3.3 — Live Pipeline End-to-End + Stability
+> Synthetic batch profiling (trtexec, 1/2/3/25/33/100) is done in M2.5/M2.6. This milestone measures the **real DeepStream pipeline** — `nvinfer` + `nvtracker` + OSD + re-stream — which the standalone-kernel numbers don't capture (gap flagged in M2.6.3).
+- [ ] Measure true end-to-end FPS on the live 3-stream pipeline (full graph, not standalone TRT); compare against the trtexec ceiling to quantify pipeline overhead
+- [ ] 30-minute stability run on all three streams; confirm no crash and no memory leak (sample RSS + VRAM over the run)
+- [ ] Record per-stream FPS and aggregate VRAM during sustained 3-stream load
+- [ ] Document the standalone-vs-end-to-end throughput gap in README
 
 ### M3.4 — GPU Tests + CI
 - [ ] Write `tests/smoke/test_pipeline_smoke.py` — launch rtsp pipeline for 10 seconds, assert frames_processed > 0 and CSV non-empty (requires GPU, `pytest --gpu`)
 - [ ] Write `tests/integration/test_motmetrics_integration.py` — run metrics on known MOT17-04 excerpt, assert HOTA within expected range (requires GPU, `pytest --gpu`)
 - [ ] Wire GitHub Actions workflow for unit tests (CPU only, no GPU runner)
+- [ ] Model-promotion gate (MLOps): version engines with a manifest (model hash, precision, build flags, accuracy snapshot); reuse the M2.6.1 detection-comparison harness as a regression check that blocks a new engine from fleet rollout if box IoU / mAP drops below threshold vs the current production engine
 
 ### M3.5 — Docs + README
 - [ ] Write `docs/jetson-upgrade.md` — component diff table: x86 dGPU config → Jetson equivalent (nvargus, JetPack, INT8, unified memory, TDP modes)
-- [ ] Write `docs/isp-and-camera-input.md` — ISP pipeline stages (demosaicing, AWB, gamma, lens distortion), nvargus on Jetson, how ISP misconfiguration degrades model accuracy
+- [ ] Write `docs/isp-and-camera-input.md` — **substantial** treatment, not a footnote (this is a full JD hard requirement: "Optical performance, ISPs, Camera tuning"). Cover: full ISP pipeline (demosaicing, AWB, denoise, gamma, lens distortion correction), `nvargus`/Argus CSI capture path on Jetson, how ISP misconfiguration (white balance, exposure, sharpening) degrades detection accuracy, and camera-tuning trade-offs for traffic scenes (night/glare/motion blur). Note explicitly: cannot be exercised on x86 dGPU (no CSI/Argus) — doc-only by hardware ceiling; lean on this in the system-design interview
 - [ ] Write `docs/system-design.md` — fleet-scale architecture: 1→5000 sensors, edge→cloud metadata path, sensor failure/reconnect, JetPack fleet upgrade strategy
 - [ ] Complete README: architecture diagram, quickstart, tracker comparison table summary, decode plugin results, known gaps with explicit reasoning, Privacy by Design section
 - [ ] Final 30-minute stability run on RTSP pipeline; confirm no crash/leak
+
+### M3.6 — Observability & Reactive Debugging
+> Maps to the JD's "Reactive Debugging and Support" (15% of the role) and "make systems more robust." Nothing else in M1–M3 addresses how you *notice* and *diagnose* a degraded sensor.
+- [ ] Structured logging across the pipeline (per-stream source_id, frame counts, FPS, dropped frames, reconnect events) — machine-parseable, not print statements
+- [ ] Per-sensor health metrics: liveness, current FPS vs expected, time-since-last-detection, VRAM/RSS; expose as a simple JSON/Prometheus-style endpoint or periodic log line
+- [ ] Failure-mode playbook in `docs/`: how to diagnose a stuck stream, a silently-degraded detector (FPS fine but detections wrong), an OOM, and a sensor that reconnects but produces no metadata
+- [ ] Demonstrate one debugging walkthrough end-to-end (inject a fault, show how the logs/metrics surface it)
 
 ---
 
