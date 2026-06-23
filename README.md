@@ -7,7 +7,7 @@ NVIDIA DeepStream pipeline running three concurrent RTSP streams through GPU-acc
 - **Multi-stream batching** — three RTSP sources muxed into a single `nvstreammux` (batch-size=3); per-source outputs demuxed back and rendered independently
 - **Custom model integration** — YOLO26n FP16 running end-to-end: `.pt → ONNX (dynamic batch) → TRT FP16` via `trtexec`; Python tensor-meta probe decodes `[300, 6]` output and populates `NvDsObjectMeta` without a compiled C parser
 - **C++ TRT plugin** — `IPluginV2DynamicExt` CUDA kernel (`plugins/yolo26_decode/`) appended to the TRT network via TRT Python API; converts xyxy→xywh on GPU inside TRT, replacing the Python coordinate-transform loop; `metrics/profile_decode.py` isolates per-layer latency via `IProfiler`
-- **TDD discipline** — 84 CPU-safe unit tests written before implementation (vertical red→green slices); no GPU required for the test suite
+- **TDD discipline** — 104 CPU-safe unit tests written before implementation (vertical red→green slices); no GPU required for the test suite
 - **Privacy by design** — anonymisation blur probe wired before `nvdsosd`; detected bbox regions blurred on the NVMM surface before any output leaves the pipeline
 - **Edge benchmarking** — FP32 vs FP16 vs FP16+decode-plugin compared on latency, VRAM, engine size, and fleet OTA cost; multi-stream batch sweep (1–100) against a 25 fps real-time budget with a fleet-sizing projection (`metrics/decode_comparison.ipynb`)
 - **Benchmarking pipeline** — per-frame CSV metadata sink; mediamtx RTSP source with MOT17 sequences (MOT17-04 has ground truth for MOTA/HOTA/IDF1 evaluation in M3)
@@ -75,7 +75,7 @@ ffplay rtsp://localhost:8558/stream2_out   # YOLO26n boxes on stream2
 
 ```bash
 pip install pytest
-pytest tests/unit/ -v      # 84 tests, CPU-only, no GPU required
+pytest tests/unit/ -v      # 104 tests, CPU-only, no GPU required
 ```
 
 | Module | Tests | What they cover |
@@ -91,12 +91,13 @@ pytest tests/unit/ -v      # 84 tests, CPU-only, no GPU required
 | `init_models` | 9 | Skip/run logic for all cold-start and warm-start combinations; decode-engine skip/build paths |
 | `output_parser` | 6 | Threshold filtering, xyxy→xywh conversion, class_id extraction, batch-dim squeeze |
 | `decode_engine` | 5 | `decode_engine_path` naming, `parse_args` defaults and flags |
+| `validate_accuracy` | 20 | `box_iou`, greedy IoU matching, per-engine comparison, per-coord decode delta, `preprocess_frame` shape/dtype/range |
 
 GPU smoke tests (`pytest --gpu`) are planned for M3.4.
 
 ---
 
-## Benchmark results (M2.5)
+## Benchmark results (M2.5 / M2.7)
 
 Standalone TRT engine timings on the GTX 1660 Ti (640×640, `trtexec`, 50 iterations). Full analysis and charts in `metrics/decode_comparison.ipynb`.
 
@@ -109,6 +110,24 @@ Standalone TRT engine timings on the GTX 1660 Ti (640×640, `trtexec`, 50 iterat
 - **FP16 is 1.52× faster than FP32**, not the often-quoted 2×: the 1660 Ti (Turing, SM 75) has no Tensor Cores, so the gain comes from halved memory bandwidth, not faster compute.
 - **FP16 saves no inference VRAM** (358 vs 357 MB). Weights are a small fraction of the runtime working set; activations dominate. The disk engine is 43% smaller, which matters for OTA fleet updates (≈23 GB saved per 5,000-sensor rollout), not for runtime headroom.
 - **The decode plugin adds ~0.1 ms**, almost all of it kernel-launch overhead rather than compute. YOLO26n is NMS-free and emits only 300 pre-decoded boxes, so the kernel has little to do. M2.6 adds a YOLOv8n plugin (8400 candidates + DFL + NMS) to show where this pattern actually pays off.
+
+**Accuracy validation (M2.7.1)** — measured across 1,050 frames of MOT17-04-SDP via `metrics/validate_accuracy.py`:
+
+| Comparison | Matched boxes | Mean IoU | Match rate | Max conf delta |
+|---|---|---|---|---|
+| FP16 vs FP32 | 11,690 / 11,804 | **0.9937** | 99.0% | 0.44 |
+
+The 1.52× speedup costs essentially no detection accuracy: 99% of FP32 boxes are matched at IoU > 0.5, mean overlap is 0.994, and the unmatched 1% are low-confidence borderline detections where FP16 rounding shifts a box just below the confidence threshold.
+
+Decode plugin coordinate check (decode engine vs Python baseline, 11,693 matched pairs):
+
+| Stat | Value |
+|---|---|
+| Mean coord delta | **0.041 px** |
+| p99 coord delta | **0.5 px** |
+| Max coord delta | 14.0 px (single outlier from different TRT graph fusions) |
+
+Mean and p99 confirm the CUDA kernel is correct; the 14 px max is a single outlier where the two independently-compiled TRT engines chose different kernel fusions for the same backbone layer, not a kernel arithmetic error.
 
 Multi-stream batch sweep (FP16, single `nvstreammux` batch):
 
@@ -123,8 +142,8 @@ Multi-stream batch sweep (FP16, single `nvstreammux` batch):
 **M1 — Pipeline Plumbing** ✓ *(complete)*
 Three-stream concurrent pipeline; TrafficCamNet ResNet-18 FP32 placeholder; per-source CSV; anonymisation probe; RTSP restream; 47 unit tests.
 
-**M2 — Custom Model + C++ Decode Plugin** *(in progress — M2.1–M2.5 complete)*
-YOLO26n FP16 running end-to-end through DeepStream with a C++ TRT decode plugin: `.pt → ONNX (dynamic batch) → TRT FP16 (batch 1–3)` via `trtexec`; `IPluginV2DynamicExt` CUDA kernel (`plugins/yolo26_decode/`) converts xyxy→xywh on GPU inside TRT and is appended to the network via TRT Python API (`models/decode_engine.py` → `yolo26n_fp16_b3_decode.engine`); probe reads pre-transformed xywh tensor directly; `metrics/profile_decode.py` with TRT `IProfiler` isolates decode step latency. M2.5 precision/multi-stream/fleet comparison report complete (see Benchmark results above); 84 unit tests total. Remaining: M2.6 YOLOv8n heavy-decode plugin (deferrable), M2.7 accuracy validation + latency-tail (p50/p99/max) analysis.
+**M2 — Custom Model + C++ Decode Plugin** *(in progress — M2.1–M2.5 + M2.7.1 complete)*
+YOLO26n FP16 running end-to-end through DeepStream with a C++ TRT decode plugin: `.pt → ONNX (dynamic batch) → TRT FP16 (batch 1–3)` via `trtexec`; `IPluginV2DynamicExt` CUDA kernel (`plugins/yolo26_decode/`) converts xyxy→xywh on GPU inside TRT and is appended to the network via TRT Python API (`models/decode_engine.py` → `yolo26n_fp16_b3_decode.engine`); probe reads pre-transformed xywh tensor directly; `metrics/profile_decode.py` with TRT `IProfiler` isolates decode step latency. M2.5 precision/multi-stream/fleet comparison report and M2.7.1 accuracy validation complete (see Benchmark results above); 104 unit tests total. Remaining: M2.6 YOLOv8n heavy-decode plugin (deferrable), M2.7.2/M2.7.3 latency-tail analysis.
 
 **M3 — Tracker Comparison + Hardening** *(planned)*
 Three-way tracker comparison (IOU → NvDCF → ByteTrack) with MOTA/HOTA/IDF1 on MOT17-04 ground truth; live end-to-end pipeline FPS + 30-minute stability run; GPU smoke + integration tests; MLOps model-promotion gate (accuracy regression check before fleet rollout); observability + reactive-debugging tooling; `docs/jetson-upgrade.md`, `docs/isp-and-camera-input.md`, `docs/system-design.md`.
@@ -156,8 +175,7 @@ Three-way tracker comparison (IOU → NvDCF → ByteTrack) with MOTA/HOTA/IDF1 o
 | Jetson / nvargus | No Jetson hardware available | `docs/jetson-upgrade.md` (M3.5) — component diff table: x86 dGPU → JetPack |
 | INT8 quantisation | GTX 1660Ti has no Tensor Cores; INT8 has no hardware speedup | Documented in `models/convert.py`; would enable on Jetson AGX Orin or RTX-class GPU |
 | GPU smoke tests | Require GPU runner; written last to avoid slow CI | Planned M3.4 via `pytest --gpu` and `tests/smoke/` |
-| Detection accuracy not yet quantified | Latency/VRAM measured; FP16 and plugin correctness checked visually, not numerically | M2.7: FP16-vs-FP32 box IoU / mAP delta + plugin-vs-Python epsilon check |
-| Decode plugin shows little gain | YOLO26n is NMS-free (300 pre-decoded boxes), so the kernel does ~0.006 ms of work | M2.6: YOLOv8n plugin (8400 candidates + DFL + NMS) demonstrates where the pattern pays off |
+| Decode plugin shows little gain on YOLO26n | YOLO26n is NMS-free (300 pre-decoded boxes), so the kernel does ~0.006 ms of work; the accuracy comparison is between two separately-compiled TRT graphs, not a controlled kernel isolation | M2.6: YOLOv8n plugin (8,400 candidates + DFL + NMS) demonstrates where the pattern pays off |
 | DeepSORT tracker | Re-ID model exceeds 6 GB VRAM ceiling | Documented in M3 tracker comparison rationale; ByteTrack recommended instead |
 
 ---

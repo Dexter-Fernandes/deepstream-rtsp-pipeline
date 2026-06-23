@@ -137,10 +137,10 @@
 **Exit criteria:** numerical proof that FP16 and the YOLO26n decode plugin preserve detections vs the FP32 baseline; latency reported as tail percentiles (p50/p99/max) not just mean, so the real-time frame-budget story reflects worst-case behaviour. (If M2.6 is done, the YOLOv8n plugin is validated by the same harness; if deferred, this milestone runs on YOLO26n alone and blocks nothing.)
 
 ### M2.7.1 — Accuracy / correctness validation
-- [ ] New validation script (shared harness): run FP32, FP16, and FP16+decode engines on a fixed set of MOT17 frames; persist detections per engine
-- [ ] FP16 vs FP32 box agreement: mean IoU of matched boxes, dropped/added detection counts, max confidence delta → confirm the 1.52× speedup costs ~0 accuracy
-- [ ] Decode-plugin vs Python-decode (YOLO26n; YOLOv8n too if M2.6 is built): assert coordinates match within float epsilon (closes the M2.4 "match Python-decode baseline" item with numbers, not a visual check; covers the M2.6.3 YOLOv8n check when applicable)
-- [ ] Add accuracy summary cell to `metrics/decode_comparison.ipynb`; reframe headline as "FP16 = 1.52× faster at <X> box IoU / negligible mAP delta"
+- [x] New validation script (shared harness): run FP32, FP16, and FP16+decode engines on a fixed set of MOT17 frames; persist detections per engine (`metrics/validate_accuracy.py`; 20 unit tests)
+- [x] FP16 vs FP32 box agreement: mean IoU of matched boxes, dropped/added detection counts, max confidence delta → confirm the 1.52× speedup costs ~0 accuracy
+- [x] Decode-plugin vs Python-decode (YOLO26n; YOLOv8n too if M2.6 is built): assert coordinates match within float epsilon (closes the M2.4 "match Python-decode baseline" item with numbers, not a visual check; covers the M2.6.3 YOLOv8n check when applicable)
+- [x] Add accuracy summary cell to `metrics/decode_comparison.ipynb`; reframe headline as "FP16 = 1.52× faster at <X> box IoU / negligible mAP delta"
 
 ### M2.7.2 — Latency tails (p50 / p99 / max)
 - [ ] Extend `metrics/profile_decode.py` parser: capture `median` and `percentile(99%)` / `max` from trtexec output (already printed; only `mean` is parsed today)

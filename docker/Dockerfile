@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM nvcr.io/nvidia/deepstream:9.0-triton-multiarch
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -13,7 +14,26 @@ RUN git clone https://github.com/NVIDIA-AI-IOT/deepstream_python_apps.git /opt/d
     && make -j$(nproc) \
     && find . -name "pyds*.so" -exec cp {} /usr/local/lib/python3.12/dist-packages/ \;
 
-RUN pip3 install opencv-python-headless ultralytics pycuda
+# TensorRT Python bindings — stable; install before other pip layers so
+# adding/changing this step doesn't cascade onto the slower installs below.
+# Installs only the bindings (not the C++ libs, which the deb package already
+# provides), then writes a one-line shim so `import tensorrt as trt` works.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --extra-index-url https://pypi.nvidia.com \
+        'tensorrt-cu12-bindings==10.14.1.48.post1' \
+    && mkdir -p /usr/local/lib/python3.12/dist-packages/tensorrt \
+    && printf 'from tensorrt_bindings.tensorrt import *\n' \
+       > /usr/local/lib/python3.12/dist-packages/tensorrt/__init__.py
+
+# pycuda in its own layer — compiles against CUDA headers; keep separate from
+# ultralytics so a torch/model update doesn't trigger a recompile.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install pycuda
+
+# opencv + ultralytics — large downloads; pip cache mount means re-installs
+# after a layer invalidation skip the network entirely.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install opencv-python-headless ultralytics
 
 # Compile yolo26_decode TRT plugin (SM 75 = GTX 1660 Ti).
 # The .so is baked into the image so init_models.py can build the decode
