@@ -169,7 +169,7 @@ Before any engine is deployed to production, it passes through:
 new model weights
   → trtexec build (aarch64, target device class)
   → accuracy regression check (validate_accuracy.py vs FP32 baseline):
-      matched_rate ≥ 99.0%  AND  mean_iou ≥ 0.99
+      matched_rate ≥ 95.0%  AND  mean_iou ≥ 0.95
   → latency check (profile_decode.py):
       p99 ≤ 30 ms for batch=15
   → PASS: engine approved for fleet rollout

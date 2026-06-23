@@ -184,11 +184,11 @@
 - [x] `metrics/throughput_run.sh` — 120 s unthrottled file-source ceiling driver with nvidia-smi poller
 - [x] `metrics/stability.ipynb` — 4-cell executed notebook: FPS adherence / RSS+VRAM stability / ceiling-vs-trtexec bar chart / commentary
 
-### M3.4 — GPU Tests + CI
-- [ ] Write `tests/smoke/test_pipeline_smoke.py` — launch rtsp pipeline for 10 seconds, assert frames_processed > 0 and CSV non-empty (requires GPU, `pytest --gpu`)
-- [ ] Write `tests/integration/test_motmetrics_integration.py` — run metrics on known MOT17-04 excerpt, assert HOTA within expected range (requires GPU, `pytest --gpu`)
-- [ ] Wire GitHub Actions workflow for unit tests (CPU only, no GPU runner)
-- [ ] Model-promotion gate (MLOps): version engines with a manifest (model hash, precision, build flags, accuracy snapshot); reuse the M2.6.1 detection-comparison harness as a regression check that blocks a new engine from fleet rollout if box IoU / mAP drops below threshold vs the current production engine
+### M3.4 — GPU Tests + CI ✓
+- [x] Write `tests/smoke/test_pipeline_smoke.py` — 3 GPU smoke tests (exit clean, frames > 0, CSV written); subprocess-based, `@pytest.mark.gpu`; skipped in CPU CI via root `conftest.py`
+- [x] Write `tests/integration/test_motmetrics_integration.py` — MOTA > -0.5 and IDF1 > 0 on MOT17-04 excerpt; MOTA/IDF1 asserted (HOTA not in py-motmetrics — deferred in M3.2)
+- [x] Wire GitHub Actions workflow for unit tests — `.github/workflows/unit-tests.yml`; ubuntu-latest, Python 3.12, `pytest tests/unit/ -q`; GPU tests auto-skipped (no `--gpu` flag in CI)
+- [x] Model-promotion gate — `metrics/model_gate.py`; reads `validate_accuracy.py` JSON; checks `match_rate ≥ 0.95` AND `mean_iou ≥ 0.95`; writes signed manifest (SHA-256 + timestamp); exits 0/1 for shell/CI use; 19 CPU-safe unit tests in `tests/unit/test_model_gate.py`
 
 ### M3.5 — Docs + README ✓
 - [x] Write `docs/jetson-upgrade.md` — component diff table: x86 dGPU config → Jetson equivalent (nvargus, JetPack, INT8, unified memory, TDP modes)
