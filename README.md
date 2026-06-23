@@ -136,6 +136,8 @@ Multi-stream batch sweep (FP16, single `nvstreammux` batch):
 - Consolidating to 15 streams/node cuts a 5,000-camera fleet from 5,000 nodes to 334, a 15× reduction.
 - batch=100 (208 ms) is offline-reprocessing only.
 
+> **Note — standalone `trtexec` vs full DeepStream pipeline (M2.7.3):** All timings above are pure TRT kernel times measured by `trtexec`. The full DeepStream graph adds scheduling overhead from `nvinfer`, `nvtracker` per-object association, `nvdsosd` composition, RTSP re-stream encode via `nvrtspoutsinkbin`, and GStreamer buffer-probe Python callbacks. These stages share the same 40 ms frame budget, so the 9 ms headroom at batch=15 is a ceiling on what the rest of the pipeline has to work within — not free slack. Measured end-to-end FPS for the live 3-stream pipeline is deferred to M3.3.
+
 ---
 
 ## Roadmap
@@ -144,7 +146,7 @@ Multi-stream batch sweep (FP16, single `nvstreammux` batch):
 Three-stream concurrent pipeline; TrafficCamNet ResNet-18 FP32 placeholder; per-source CSV; anonymisation probe; RTSP restream; 47 unit tests.
 
 **M2 — Custom Model + C++ Decode Plugin** *(in progress — M2.1–M2.5 + M2.7.1 complete)*
-YOLO26n FP16 running end-to-end through DeepStream with a C++ TRT decode plugin: `.pt → ONNX (dynamic batch) → TRT FP16 (batch 1–3)` via `trtexec`; `IPluginV2DynamicExt` CUDA kernel (`plugins/yolo26_decode/`) converts xyxy→xywh on GPU inside TRT and is appended to the network via TRT Python API (`models/decode_engine.py` → `yolo26n_fp16_b3_decode.engine`); probe reads pre-transformed xywh tensor directly; `metrics/profile_decode.py` with TRT `IProfiler` isolates decode step latency. M2.5 precision/multi-stream/fleet comparison, M2.7.1 accuracy validation, and M2.7.2 tail-latency parser complete (see Benchmark results above); 114 unit tests total. Remaining: M2.6 YOLOv8n heavy-decode plugin (deferrable), M2.7.3 end-to-end framing.
+YOLO26n FP16 running end-to-end through DeepStream with a C++ TRT decode plugin: `.pt → ONNX (dynamic batch) → TRT FP16 (batch 1–3)` via `trtexec`; `IPluginV2DynamicExt` CUDA kernel (`plugins/yolo26_decode/`) converts xyxy→xywh on GPU inside TRT and is appended to the network via TRT Python API (`models/decode_engine.py` → `yolo26n_fp16_b3_decode.engine`); probe reads pre-transformed xywh tensor directly; `metrics/profile_decode.py` with TRT `IProfiler` isolates decode step latency. M2.5 precision/multi-stream/fleet comparison, M2.7.1 accuracy validation, M2.7.2 tail-latency parser, and M2.7.3 standalone-vs-pipeline framing complete (see Benchmark results above); 114 unit tests total. Remaining: M2.6 YOLOv8n heavy-decode plugin (deferrable).
 
 **M3 — Tracker Comparison + Hardening** *(planned)*
 Three-way tracker comparison (IOU → NvDCF → ByteTrack) with MOTA/HOTA/IDF1 on MOT17-04 ground truth; live end-to-end pipeline FPS + 30-minute stability run; GPU smoke + integration tests; MLOps model-promotion gate (accuracy regression check before fleet rollout); observability + reactive-debugging tooling; `docs/jetson-upgrade.md`, `docs/isp-and-camera-input.md`, `docs/system-design.md`.

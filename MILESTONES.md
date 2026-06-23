@@ -149,8 +149,8 @@
 - [x] Note in commentary: real-time budget is violated by the tail, not the mean
 
 ### M2.7.3 — End-to-end pipeline framing
-- [ ] Add a note distinguishing standalone `trtexec` numbers from full DeepStream throughput (`nvinfer` + `nvtracker` + OSD + re-stream consume the 3.8 ms headroom); defer measured end-to-end FPS to M3.3
-- [ ] INT8 as a third precision point deferred — see Stretch Goals (1660 Ti has no Tensor Cores; INT8 via DP4A possible but accuracy/speed trade-off better shown on RTX/Jetson)
+- [x] Add a note distinguishing standalone `trtexec` numbers from full DeepStream throughput (`nvinfer` + `nvtracker` + OSD + re-stream consume the 3.8 ms headroom); defer measured end-to-end FPS to M3.3
+- [x] INT8 as a third precision point deferred — see Stretch Goals (1660 Ti has no Tensor Cores; INT8 via DP4A possible but accuracy/speed trade-off better shown on RTX/Jetson)
 
 ---
 
