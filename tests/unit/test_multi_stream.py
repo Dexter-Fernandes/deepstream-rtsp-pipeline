@@ -66,3 +66,16 @@ def test_make_nvinfer_config_rewrites_engine_path(tmp_path):
     content = Path(out).read_text()
     assert "_b3_gpu0_fp32.engine" in content
     assert "_b1_gpu0_fp32.engine" not in content
+
+
+def test_default_tracker_config():
+    assert MultiStreamConfig().tracker_config == "configs/tracker_iou.yml"
+
+
+def test_parse_args_tracker_flag():
+    config = parse_args(["--tracker", "configs/tracker_nvdcf.yml"])
+    assert config.tracker_config == "configs/tracker_nvdcf.yml"
+
+
+def test_parse_args_tracker_default():
+    assert parse_args([]).tracker_config == "configs/tracker_iou.yml"

@@ -64,3 +64,16 @@ def test_restream_sink_props_port():
 def test_restream_sink_props_mount_point():
     props = _restream_sink_props("rtsp://localhost:8554/stream0_out")
     assert props["rtsp-mount-point"] == "/stream0_out"
+
+
+def test_default_tracker_config():
+    assert PipelineConfig().tracker_config == "configs/tracker_iou.yml"
+
+
+def test_parse_args_tracker_flag():
+    config = parse_args(["--tracker", "configs/tracker_bytetrack.yml"])
+    assert config.tracker_config == "configs/tracker_bytetrack.yml"
+
+
+def test_parse_args_tracker_default():
+    assert parse_args([]).tracker_config == "configs/tracker_iou.yml"

@@ -25,6 +25,7 @@ class MultiStreamConfig:
     restream_base_port: int | None = None
     anonymise: bool = False
     conf_threshold: float = 0.25
+    tracker_config: str = "configs/tracker_iou.yml"
 
 
 def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
@@ -36,6 +37,12 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
     parser.add_argument("--restream-base-port", type=int, default=None, dest="restream_base_port", help="Base port for nvrtspoutsinkbin (stream0=base, stream1=base+1, ...)")
     parser.add_argument("--anonymise", action="store_true", dest="anonymise", help="Enable blur anonymisation")
     parser.add_argument("--conf-threshold", type=float, default=0.25, dest="conf_threshold", help="Detection confidence threshold (default: 0.25)")
+    parser.add_argument(
+        "--tracker",
+        default="configs/tracker_iou.yml",
+        dest="tracker_config",
+        help="Path to nvtracker YAML config (tracker_iou.yml / tracker_nvdcf.yml / tracker_bytetrack.yml)",
+    )
     args = parser.parse_args(argv)
     return MultiStreamConfig(
         uris=args.uris,
@@ -45,6 +52,7 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
         restream_base_port=args.restream_base_port,
         anonymise=args.anonymise,
         conf_threshold=args.conf_threshold,
+        tracker_config=args.tracker_config,
     )
 
 
@@ -168,6 +176,7 @@ def build_pipeline(config: MultiStreamConfig):
         "ll-lib-file",
         "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so",
     )
+    tracker.set_property("ll-config-file", config.tracker_config)
 
     # ── Source bins → mux ────────────────────────────────────────────────────
     # Each bin is: rtspsrc → rtph264depay → nvv4l2decoder → queue

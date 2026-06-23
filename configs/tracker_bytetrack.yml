@@ -1,0 +1,40 @@
+%YAML:1.0
+# ByteTrack-inspired config using NvSORT (DS 9.0's closest equivalent).
+# Key ByteTrack ideas implemented: cascaded (two-stage) matching via
+# associationMatcherType=1, low minDetectorConfidence to recover occluded targets,
+# and tentativeDetectorConfidence to separate high/low confidence associations.
+# No appearance model — pure motion (Kalman) + IOU, same as ByteTrack paper.
+
+BaseConfig:
+  minDetectorConfidence: 0.10    # low threshold recovers occluded detections (ByteTrack stage 2)
+
+TargetManagement:
+  enableBboxUnClipping: 0
+  maxTargetsPerStream: 150
+  minIouDiff4NewTarget: 0.5780
+  minTrackerConfidence: 0.8216
+  probationAge: 3
+  maxShadowTrackingAge: 30
+  earlyTerminationAge: 1
+
+TrajectoryManagement:
+  useUniqueID: 0
+
+DataAssociator:
+  dataAssociatorType: 0
+  associationMatcherType: 1      # CASCADED — high-conf first, low-conf rescue pass
+  checkClassMatch: 1
+  minMatchingScore4Overall: 0.2543
+  minMatchingScore4SizeSimilarity: 0.4019
+  minMatchingScore4Iou: 0.2159
+  matchingScoreWeight4SizeSimilarity: 0.1365
+  matchingScoreWeight4Iou: 0.3836
+  tentativeDetectorConfidence: 0.50   # high-confidence threshold (ByteTrack τ_high)
+  minMatchingScore4TentativeIou: 0.2867
+  usePrediction4Assoc: 1
+
+StateEstimator:
+  stateEstimatorType: 2          # REGULAR Kalman — full velocity model
+  noiseWeightVar4Loc: 0.0301
+  noiseWeightVar4Vel: 0.0017
+  useAspectRatio: 1

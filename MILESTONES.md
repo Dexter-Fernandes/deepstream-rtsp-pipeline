@@ -158,12 +158,12 @@
 
 **Exit criteria:** tracker comparison report with full MOTA/HOTA/IDF1; multi-stream benchmarking complete; all tests passing; docs complete.
 
-### M3.1 — Tracker Configs
-- [ ] Write `configs/tracker_iou.yml` (IOU tracker config for DeepStream)
-- [ ] Write `configs/tracker_nvdcf.yml` (NvDCF config)
-- [ ] Write `configs/tracker_bytetrack.yml` (ByteTrack config)
-- [ ] Add `--tracker` CLI flag to `pipelines/rtsp.py` to swap configs without code change
-- [ ] Run each tracker on MOT17-04 on all frames; save separate CSV per tracker
+### M3.1 — Tracker Configs ✓
+- [x] Write `configs/tracker_iou.yml` (IOU tracker config for DeepStream)
+- [x] Write `configs/tracker_nvdcf.yml` (NvDCF config)
+- [x] Write `configs/tracker_bytetrack.yml` (ByteTrack-inspired via NvSORT — DS 9.0 has no native ByteTrack; cascaded matcher + low minDetectorConfidence replicates two-stage association)
+- [x] Add `--tracker` CLI flag to `pipelines/rtsp.py` and `pipelines/multi_stream.py` to swap configs without code change; `tracker_config` field on both config dataclasses (6 new unit tests, 120 total)
+- [x] Run each tracker on MOT17-04; CSVs confirmed populated in `metrics/tracker_results/{iou,nvdcf,bytetrack}/output_stream0.csv`
 
 ### M3.2 — Tracker Metrics (py-motmetrics)
 - [ ] Install `py-motmetrics` in container
