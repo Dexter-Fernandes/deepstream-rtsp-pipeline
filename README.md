@@ -4,14 +4,14 @@ NVIDIA DeepStream pipeline running three concurrent RTSP streams through GPU-acc
 
 ## What this demonstrates
 
-- **Multi-stream batching** — three RTSP sources muxed into a single `nvstreammux` (batch-size=3); per-source outputs demuxed back and rendered independently
-- **Custom model integration** — YOLO26n FP16 running end-to-end: `.pt → ONNX (dynamic batch) → TRT FP16` via `trtexec`; Python tensor-meta probe decodes `[300, 6]` output and populates `NvDsObjectMeta` without a compiled C parser
-- **C++ TRT plugin** — `IPluginV2DynamicExt` CUDA kernel (`plugins/yolo26_decode/`) appended to the TRT network via TRT Python API; converts xyxy→xywh on GPU inside TRT, replacing the Python coordinate-transform loop; `metrics/profile_decode.py` isolates per-layer latency via `IProfiler`
-- **TDD discipline** — 114 CPU-safe unit tests written before implementation (vertical red→green slices); no GPU required for the test suite
-- **Privacy by design** — anonymisation blur probe wired before `nvdsosd`; detected bbox regions blurred on the NVMM surface before any output leaves the pipeline
-- **Edge benchmarking** — FP32 vs FP16 vs FP16+decode-plugin compared on latency, VRAM, engine size, and fleet OTA cost; multi-stream batch sweep (1–100) against a 25 fps real-time budget with a fleet-sizing projection (`metrics/decode_comparison.ipynb`)
-- **Benchmarking pipeline** — per-frame CSV metadata sink; mediamtx RTSP source with MOT17 sequences (MOT17-04 has ground truth for MOTA/HOTA/IDF1 evaluation in M3)
-- **Reproducible environment** — NGC DeepStream 9.0 container + pyds compiled from source; `docker compose up` auto-exports and converts the model on first run, then starts the pipeline
+- Three RTSP sources batched through a single `nvstreammux`, demuxed back per-source for independent OSD and restream output
+- YOLO26n FP16 running end-to-end: `.pt → ONNX (dynamic batch) → TRT FP16` via `trtexec`; Python tensor-meta probe decodes `[300, 6]` output and populates `NvDsObjectMeta` without a compiled C parser
+- `IPluginV2DynamicExt` CUDA kernel appended to the TRT network via TRT Python API; converts xyxy→xywh on GPU inside TRT, replacing the Python coordinate-transform loop; `metrics/profile_decode.py` isolates per-layer latency via `IProfiler`
+- 114 CPU-safe unit tests written before implementation (red→green); no GPU required for the test suite
+- Gaussian blur applied to every detected bbox region before `nvdsosd` renders or any output leaves the pipeline
+- FP32 vs FP16 vs FP16+decode-plugin compared on latency, VRAM, engine size, and fleet OTA cost; batch sweep 1–100 against a 25 fps real-time budget with fleet-sizing projections (`metrics/decode_comparison.ipynb`)
+- Per-frame CSV sink; mediamtx-served MOT17 sequences as the RTSP source (MOT17-04 has ground truth for MOTA/HOTA/IDF1 tracker evaluation)
+- NGC DeepStream 9.0 + pyds compiled from source; `docker compose up` handles model export and conversion on first run
 
 ---
 
@@ -98,7 +98,7 @@ GPU smoke tests (`pytest --gpu`) are planned for M3.4.
 
 ---
 
-## Benchmark results (M2.5 / M2.7)
+## Benchmark results
 
 Standalone TRT engine timings on the GTX 1660 Ti (640×640, `trtexec`, 50 iterations). Full analysis and charts in `metrics/decode_comparison.ipynb`.
 
@@ -112,7 +112,7 @@ Standalone TRT engine timings on the GTX 1660 Ti (640×640, `trtexec`, 50 iterat
 - **FP16 saves no inference VRAM** (358 vs 357 MB). Weights are a small fraction of the runtime working set; activations dominate. The disk engine is 43% smaller, which matters for OTA fleet updates (≈23 GB saved per 5,000-sensor rollout), not for runtime headroom.
 - **The decode plugin adds ~0.1 ms**, almost all of it kernel-launch overhead rather than compute. YOLO26n is NMS-free and emits only 300 pre-decoded boxes, so the kernel has little to do. M2.6 adds a YOLOv8n plugin (8400 candidates + DFL + NMS) to show where this pattern actually pays off.
 
-**Accuracy validation (M2.7.1)** — measured across 1,050 frames of MOT17-04-SDP via `metrics/validate_accuracy.py`:
+**Accuracy validation** — measured across 1,050 frames of MOT17-04-SDP via `metrics/validate_accuracy.py`:
 
 | Comparison | Matched boxes | Mean IoU | Match rate | Max conf delta |
 |---|---|---|---|---|
@@ -136,7 +136,7 @@ Multi-stream batch sweep (FP16, single `nvstreammux` batch):
 - Consolidating to 15 streams/node cuts a 5,000-camera fleet from 5,000 nodes to 334, a 15× reduction.
 - batch=100 (208 ms) is offline-reprocessing only.
 
-> **Note — standalone `trtexec` vs full DeepStream pipeline (M2.7.3):** All timings above are pure TRT kernel times measured by `trtexec`. The full DeepStream graph adds scheduling overhead from `nvinfer`, `nvtracker` per-object association, `nvdsosd` composition, RTSP re-stream encode via `nvrtspoutsinkbin`, and GStreamer buffer-probe Python callbacks. These stages share the same 40 ms frame budget, so the 9 ms headroom at batch=15 is a ceiling on what the rest of the pipeline has to work within — not free slack. Measured end-to-end FPS for the live 3-stream pipeline is deferred to M3.3.
+> **Standalone `trtexec` vs full pipeline:** All timings above are pure TRT kernel times. The full DeepStream graph adds scheduling overhead from `nvinfer`, `nvtracker` per-object association, `nvdsosd` composition, RTSP re-stream encode via `nvrtspoutsinkbin`, and GStreamer probe callbacks. These stages share the same 40 ms frame budget, so the 9 ms headroom at batch=15 is a ceiling on what the rest of the pipeline has to fit into. Measured end-to-end FPS for the live 3-stream pipeline is deferred to M3.3.
 
 ---
 
@@ -145,8 +145,8 @@ Multi-stream batch sweep (FP16, single `nvstreammux` batch):
 **M1 — Pipeline Plumbing** ✓ *(complete)*
 Three-stream concurrent pipeline; TrafficCamNet ResNet-18 FP32 placeholder; per-source CSV; anonymisation probe; RTSP restream; 47 unit tests.
 
-**M2 — Custom Model + C++ Decode Plugin** *(in progress — M2.1–M2.5 + M2.7.1 complete)*
-YOLO26n FP16 running end-to-end through DeepStream with a C++ TRT decode plugin: `.pt → ONNX (dynamic batch) → TRT FP16 (batch 1–3)` via `trtexec`; `IPluginV2DynamicExt` CUDA kernel (`plugins/yolo26_decode/`) converts xyxy→xywh on GPU inside TRT and is appended to the network via TRT Python API (`models/decode_engine.py` → `yolo26n_fp16_b3_decode.engine`); probe reads pre-transformed xywh tensor directly; `metrics/profile_decode.py` with TRT `IProfiler` isolates decode step latency. M2.5 precision/multi-stream/fleet comparison, M2.7.1 accuracy validation, M2.7.2 tail-latency parser, and M2.7.3 standalone-vs-pipeline framing complete (see Benchmark results above); 114 unit tests total. Remaining: M2.6 YOLOv8n heavy-decode plugin (deferrable).
+**M2 — Custom Model + C++ Decode Plugin** *(in progress)*
+YOLO26n FP16 runs end-to-end through DeepStream with a C++ TRT decode plugin. The `IPluginV2DynamicExt` CUDA kernel does the xyxy→xywh coordinate transform on GPU inside TRT; `models/decode_engine.py` builds the plugin-appended engine via TRT Python API. Precision comparison, multi-stream batch sweep (up to 100 streams), accuracy validation against a FP32 baseline, and latency-tail analysis (p99, jitter) are all complete; 114 unit tests. Remaining: M2.6 YOLOv8n heavy-decode plugin (deferrable — M3 tracker work takes priority).
 
 **M3 — Tracker Comparison + Hardening** *(planned)*
 Three-way tracker comparison (IOU → NvDCF → ByteTrack) with MOTA/HOTA/IDF1 on MOT17-04 ground truth; live end-to-end pipeline FPS + 30-minute stability run; GPU smoke + integration tests; MLOps model-promotion gate (accuracy regression check before fleet rollout); observability + reactive-debugging tooling; `docs/jetson-upgrade.md`, `docs/isp-and-camera-input.md`, `docs/system-design.md`.
@@ -185,8 +185,8 @@ Three-way tracker comparison (IOU → NvDCF → ByteTrack) with MOTA/HOTA/IDF1 o
 
 ## Privacy by Design
 
-The pipeline applies Gaussian blur to every detected bounding-box region before frames reach any output sink. This is implemented as a GStreamer buffer probe on each per-source `nvdsosd_{i}` sink pad (`pipelines/multi_stream.py`), calling `blur_bboxes()` (`pipelines/anonymisation.py`) on the raw `NvBufSurface`-backed numpy array for each frame.
+The pipeline blurs every detected bounding-box region before frames reach any output sink. A GStreamer buffer probe on each per-source `nvdsosd_{i}` sink pad calls `blur_bboxes()` (`pipelines/anonymisation.py`) on the raw `NvBufSurface`-backed numpy array for each frame.
 
-Blurring runs *before* `nvdsosd` renders the overlay boxes, so anonymised pixels are written back into the GPU surface and any downstream consumer (display or encode) sees the blurred content. No raw face or licence-plate pixel data is written to the CSV metadata sink — only bounding-box coordinates, class labels, object IDs, and confidence scores are persisted.
+Blurring runs *before* `nvdsosd` renders the overlay boxes, so anonymised pixels are written back into the GPU surface and any downstream consumer (display or encode) sees the blurred content. The CSV metadata sink stores only bounding-box coordinates, class labels, object IDs, and confidence scores — no raw face or licence-plate pixel data.
 
-`blur_bboxes()` clips all coordinates to the frame boundary and skips zero-area regions, so out-of-range detections are handled safely without crashing the pipeline.
+`blur_bboxes()` clips coordinates to the frame boundary and skips zero-area regions, so out-of-range detections are handled safely without crashing the pipeline.
