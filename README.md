@@ -175,9 +175,9 @@ YOLO26n FP16 runs end-to-end through DeepStream with a C++ TRT decode plugin. Th
 
 - ✓ **M3.1** — Three tracker configs (IOU / NvDCF / ByteTrack); `--tracker` CLI flag; `probationAge` tuning; tracker CSVs in `metrics/tracker_results/`
 - ✓ **M3.2** — MOTA/MOTP/IDF1 evaluation via `py-motmetrics` on MOT17-04 GT; `metrics/evaluate_tracker.py`; `metrics/tracker_comparison.ipynb` with summary table + bar charts; fixed `bInferDone` / `detector_bbox_info` probe bugs; file-input source branch for GT-aligned eval
-- ✓ **M3.3** — Live end-to-end FPS (131 fps unthrottled / 25 fps live) + 30-min stability run; `metrics/perf_monitor.py` (21 CPU-safe tests); `--perf-json / --duration / --no-sync` flags; `metrics/stability.ipynb`
+- ✓ **M3.3** — Live end-to-end FPS (131 fps unthrottled / 29.7 fps live) + 30-min stability run; `metrics/perf_monitor.py` (21 CPU-safe tests); `--perf-json / --duration / --no-sync` flags; `metrics/stability.ipynb`
 - ☐ **M3.4** — GPU smoke + integration tests; GitHub Actions for unit tests; model-promotion gate
-- ☐ **M3.5** — `docs/jetson-upgrade.md`, `docs/isp-and-camera-input.md`, `docs/system-design.md`; README completeness pass
+- ✓ **M3.5** — `docs/jetson-upgrade.md`, `docs/isp-and-camera-input.md`, `docs/system-design.md`; README completeness pass
 - ☐ **M3.6** — Observability: structured per-stream logging, per-sensor health metrics, failure-mode playbook
 
 ---

@@ -190,12 +190,12 @@
 - [ ] Wire GitHub Actions workflow for unit tests (CPU only, no GPU runner)
 - [ ] Model-promotion gate (MLOps): version engines with a manifest (model hash, precision, build flags, accuracy snapshot); reuse the M2.6.1 detection-comparison harness as a regression check that blocks a new engine from fleet rollout if box IoU / mAP drops below threshold vs the current production engine
 
-### M3.5 — Docs + README
-- [ ] Write `docs/jetson-upgrade.md` — component diff table: x86 dGPU config → Jetson equivalent (nvargus, JetPack, INT8, unified memory, TDP modes)
-- [ ] Write `docs/isp-and-camera-input.md` — **substantial** treatment, not a footnote (this is a full JD hard requirement: "Optical performance, ISPs, Camera tuning"). Cover: full ISP pipeline (demosaicing, AWB, denoise, gamma, lens distortion correction), `nvargus`/Argus CSI capture path on Jetson, how ISP misconfiguration (white balance, exposure, sharpening) degrades detection accuracy, and camera-tuning trade-offs for traffic scenes (night/glare/motion blur). Note explicitly: cannot be exercised on x86 dGPU (no CSI/Argus) — doc-only by hardware ceiling; lean on this in the system-design interview
-- [ ] Write `docs/system-design.md` — fleet-scale architecture: 1→5000 sensors, edge→cloud metadata path, sensor failure/reconnect, JetPack fleet upgrade strategy
-- [ ] Complete README: architecture diagram, quickstart, tracker comparison table summary, decode plugin results, known gaps with explicit reasoning, Privacy by Design section
-- [ ] Final 30-minute stability run on RTSP pipeline; confirm no crash/leak
+### M3.5 — Docs + README ✓
+- [x] Write `docs/jetson-upgrade.md` — component diff table: x86 dGPU config → Jetson equivalent (nvargus, JetPack, INT8, unified memory, TDP modes)
+- [x] Write `docs/isp-and-camera-input.md` — **substantial** treatment, not a footnote (this is a full JD hard requirement: "Optical performance, ISPs, Camera tuning"). Cover: full ISP pipeline (demosaicing, AWB, denoise, gamma, lens distortion correction), `nvargus`/Argus CSI capture path on Jetson, how ISP misconfiguration (white balance, exposure, sharpening) degrades detection accuracy, and camera-tuning trade-offs for traffic scenes (night/glare/motion blur). Note explicitly: cannot be exercised on x86 dGPU (no CSI/Argus) — doc-only by hardware ceiling; lean on this in the system-design interview
+- [x] Write `docs/system-design.md` — fleet-scale architecture: 1→5000 sensors, edge→cloud metadata path, sensor failure/reconnect, JetPack fleet upgrade strategy
+- [x] Complete README: tracker comparison section, end-to-end FPS table, known gaps with reasoning, roadmap status, real measured numbers throughout
+- [x] Final 30-minute stability run on RTSP pipeline; confirm no crash/leak (peak VRAM 1,632 MB; RSS −260 MB; `leak_suspected=false`)
 
 ### M3.6 — Observability & Reactive Debugging
 > Maps to the JD's "Reactive Debugging and Support" (15% of the role) and "make systems more robust." Nothing else in M1–M3 addresses how you *notice* and *diagnose* a degraded sensor.
