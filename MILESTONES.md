@@ -165,11 +165,12 @@
 - [x] Add `--tracker` CLI flag to `pipelines/rtsp.py` and `pipelines/multi_stream.py` to swap configs without code change; `tracker_config` field on both config dataclasses (6 new unit tests, 120 total)
 - [x] Run each tracker on MOT17-04; CSVs confirmed populated in `metrics/tracker_results/{iou,nvdcf,bytetrack}/output_stream0.csv`
 
-### M3.2 — Tracker Metrics (py-motmetrics)
-- [ ] Install `py-motmetrics` in container
-- [ ] Write `metrics/evaluate_tracker.py`: load MOT17-04 GT + pipeline CSV → compute MOTA, MOTP, HOTA, IDF1
-- [ ] Add no-GT metrics: parse CSV for ID switches, track fragmentation, mean FPS, peak VRAM
-- [ ] Produce `metrics/tracker_comparison.ipynb` with full comparison table
+### M3.2 — Tracker Metrics (py-motmetrics) ✓
+- [x] Install `py-motmetrics` in container (`docker/Dockerfile`; v1.4.0)
+- [x] Write `metrics/evaluate_tracker.py`: load MOT17-04 GT + pipeline CSV → compute MOTA, MOTP, IDF1, ID-switches, fragmentations (HOTA deferred — not in py-motmetrics; needs TrackEval)
+- [x] Add no-GT metrics: unique-track count + per-frame detection counts from CSV (FPS/VRAM belong to M3.3 end-to-end profiling)
+- [x] Produce `metrics/tracker_comparison.ipynb` with comparison table + bar charts (executed, outputs embedded)
+- [x] **Pipeline fix (prereq):** probe-injected objects were silently dropped by `nvtracker` — fixed by setting `frame_meta.bInferDone=1`, populating `detector_bbox_info.org_bbox_coords`, and `object_id=UNTRACKED_OBJECT_ID`. Added file-input source branch to `multi_stream.py` for GT-aligned eval (`--uri data/mot17_04.mp4` plays from frame 0). Regression tests added.
 
 ### M3.3 — Live Pipeline End-to-End + Stability
 > Synthetic batch profiling (trtexec, 1/2/3/25/33/100) is done in M2.5/M2.6. This milestone measures the **real DeepStream pipeline** — `nvinfer` + `nvtracker` + OSD + re-stream — which the standalone-kernel numbers don't capture (gap flagged in M2.6.3).

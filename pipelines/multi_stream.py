@@ -93,8 +93,69 @@ def _make_nvinfer_config(base_config: str, n: int) -> str:
     return out_path
 
 
+def _is_file_uri(uri: str) -> bool:
+    """A source is treated as a local file unless it's an rtsp:// URI."""
+    return not uri.startswith("rtsp://")
+
+
+def _make_file_source_bin(pipeline, config: MultiStreamConfig, idx: int):
+    """Build filesrc→qtdemux→h264parse→decoder→queue for one MP4 file.
+
+    Used for GT-aligned evaluation: a file source plays from frame 0 and emits
+    EOS after exactly one pass, so prediction frame N maps to GT frame N+1.
+    """
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+
+    path = config.uris[idx]
+    if path.startswith("file://"):
+        path = path[len("file://"):]
+
+    source = Gst.ElementFactory.make("filesrc", f"source_{idx}")
+    demux = Gst.ElementFactory.make("qtdemux", f"qtdemux_{idx}")
+    parser = Gst.ElementFactory.make("h264parse", f"h264parse_{idx}")
+    decoder = Gst.ElementFactory.make("nvv4l2decoder", f"decoder_{idx}")
+    queue = Gst.ElementFactory.make("queue", f"queue_{idx}")
+
+    for name, el in [
+        (f"filesrc_{idx}", source), (f"qtdemux_{idx}", demux),
+        (f"h264parse_{idx}", parser), (f"nvv4l2decoder_{idx}", decoder),
+        (f"queue_{idx}", queue),
+    ]:
+        if not el:
+            raise RuntimeError(f"Could not create GStreamer element: {name}")
+        pipeline.add(el)
+
+    source.set_property("location", path)
+
+    source.link(demux)
+    parser.link(decoder)
+    decoder.link(queue)
+
+    def _on_pad_added(_demux, new_pad, _parser=parser, _idx=idx):
+        sink_pad = _parser.get_static_pad("sink")
+        if sink_pad.is_linked():
+            return
+        caps = new_pad.get_current_caps() or new_pad.query_caps(None)
+        name = caps.to_string() if caps else ""
+        if not name.startswith("video"):
+            return  # skip audio/other tracks
+        new_pad.link(sink_pad)
+
+    demux.connect("pad-added", _on_pad_added)
+    return queue
+
+
 def _make_source_bin(pipeline, config: MultiStreamConfig, idx: int):
-    """Build rtspsrc→depay→decoder→queue for one source and return the queue element."""
+    """Build a source bin and return its queue element.
+
+    Dispatches to a file branch for local MP4s (GT-aligned eval) or an rtsp
+    branch for live streams.
+    """
+    if _is_file_uri(config.uris[idx]):
+        return _make_file_source_bin(pipeline, config, idx)
+
     import gi
     gi.require_version("Gst", "1.0")
     from gi.repository import Gst
@@ -324,6 +385,11 @@ def run(config: MultiStreamConfig) -> None:
             except StopIteration:
                 break
 
+            # nvinfer runs in output-tensor-meta mode and never marks the frame
+            # as inferred, so nvtracker would skip it and drop every object.
+            # We decode the tensor and inject objects here, so flag it ourselves.
+            frame_meta.bInferDone = 1
+
             user_meta_list = frame_meta.frame_user_meta_list
             while user_meta_list is not None:
                 try:
@@ -345,14 +411,26 @@ def run(config: MultiStreamConfig) -> None:
                         if conf < config.conf_threshold:
                             continue
                         obj_meta = pyds.nvds_acquire_obj_meta_from_pool(batch_meta)
+                        obj_meta.object_id = 0xFFFFFFFFFFFFFFFF  # UNTRACKED_OBJECT_ID — nvtracker assigns a fresh ID
                         obj_meta.unique_component_id = tensor_meta.unique_id
                         obj_meta.confidence = conf
                         obj_meta.class_id = int(tensor[i, 5])
+                        left = float(tensor[i, 0]) * _scale_x
+                        top = float(tensor[i, 1]) * _scale_y
+                        width = float(tensor[i, 2]) * _scale_x
+                        height = float(tensor[i, 3]) * _scale_y
+                        # nvtracker associates on detector_bbox_info.org_bbox_coords,
+                        # not rect_params — must populate both or it drops the object.
+                        bbox = obj_meta.detector_bbox_info.org_bbox_coords
+                        bbox.left = left
+                        bbox.top = top
+                        bbox.width = width
+                        bbox.height = height
                         rect = obj_meta.rect_params
-                        rect.left = float(tensor[i, 0]) * _scale_x
-                        rect.top = float(tensor[i, 1]) * _scale_y
-                        rect.width = float(tensor[i, 2]) * _scale_x
-                        rect.height = float(tensor[i, 3]) * _scale_y
+                        rect.left = left
+                        rect.top = top
+                        rect.width = width
+                        rect.height = height
                         rect.border_width = 3
                         rect.border_color.red = 0.0
                         rect.border_color.green = 1.0

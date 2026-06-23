@@ -11,7 +11,7 @@ TargetManagement:
   maxTargetsPerStream: 150
   minIouDiff4NewTarget: 0.7418
   minTrackerConfidence: 0.4009
-  probationAge: 2
+  probationAge: 1
   maxShadowTrackingAge: 51
   earlyTerminationAge: 1
 

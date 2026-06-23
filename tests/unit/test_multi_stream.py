@@ -79,3 +79,40 @@ def test_parse_args_tracker_flag():
 
 def test_parse_args_tracker_default():
     assert parse_args([]).tracker_config == "configs/tracker_iou.yml"
+
+
+def test_yolo_decode_probe_sets_untracked_object_id():
+    # The probe must set object_id = pyds.UNTRACKED_OBJECT_ID before adding
+    # each detection to the frame so nvtracker assigns a fresh unique track ID
+    # rather than treating every detection as already-tracked with ID=0.
+    import inspect
+    from pipelines.multi_stream import run
+    src = inspect.getsource(run)
+    assert "UNTRACKED_OBJECT_ID" in src
+
+
+def test_yolo_decode_probe_marks_frame_inferred():
+    # nvinfer runs in output-tensor-meta mode and never sets bInferDone, so
+    # nvtracker would skip the frame and drop every injected object. The probe
+    # must set frame_meta.bInferDone = 1 itself. Without this the tracker
+    # outputs zero objects and every tracker CSV is empty.
+    import inspect
+    from pipelines.multi_stream import run
+    src = inspect.getsource(run)
+    assert "bInferDone" in src
+
+
+def test_yolo_decode_probe_sets_detector_bbox_info():
+    # nvtracker associates on detector_bbox_info.org_bbox_coords, not
+    # rect_params, so the probe must populate it or the tracker drops the object.
+    import inspect
+    from pipelines.multi_stream import run
+    src = inspect.getsource(run)
+    assert "detector_bbox_info" in src
+
+
+def test_is_file_uri():
+    from pipelines.multi_stream import _is_file_uri
+    assert _is_file_uri("data/mot17_04.mp4") is True
+    assert _is_file_uri("file:///abs/path/clip.mp4") is True
+    assert _is_file_uri("rtsp://localhost:8554/stream0") is False

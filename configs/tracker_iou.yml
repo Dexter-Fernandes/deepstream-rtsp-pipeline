@@ -8,7 +8,7 @@ BaseConfig:
 TargetManagement:
   maxTargetsPerStream: 150       # pedestrian-heavy MOT17 scenes
   minIouDiff4NewTarget: 0.5
-  probationAge: 4
+  probationAge: 1
   maxShadowTrackingAge: 38
   earlyTerminationAge: 1
 
