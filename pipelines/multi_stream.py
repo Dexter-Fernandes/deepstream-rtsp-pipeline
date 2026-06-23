@@ -1,16 +1,22 @@
 import argparse
 import ctypes
+import logging
 import signal
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from pipelines.structured_log import configure_pipeline_logging, get_pipeline_logger, log_event
+
+configure_pipeline_logging()
+_log = get_pipeline_logger("multi_stream")
 
 _PLUGIN_LIB = Path("/opt/ds_plugins/libyolo26_decode.so")
 if _PLUGIN_LIB.exists():
     ctypes.CDLL(str(_PLUGIN_LIB), ctypes.RTLD_GLOBAL)
-    print(f"[pipeline] Loaded TRT plugin: {_PLUGIN_LIB}", flush=True)
+    log_event(_log, logging.INFO, event="plugin_loaded", plugin=str(_PLUGIN_LIB))
 else:
-    print(f"[pipeline] WARNING: plugin lib not found at {_PLUGIN_LIB} — decode engine will fail", flush=True)
+    log_event(_log, logging.WARNING, event="plugin_missing", plugin=str(_PLUGIN_LIB),
+              detail="decode engine will fail if plugin is required")
 
 
 @dataclass
@@ -199,7 +205,8 @@ def _make_source_bin(pipeline, config: MultiStreamConfig, idx: int):
             return
         ret = new_pad.link(sink_pad)
         if ret not in (Gst.PadLinkReturn.OK, Gst.PadLinkReturn.WAS_LINKED):
-            print(f"[multi_stream] source {_idx} pad link returned {ret} — likely RTCP, ignoring", file=sys.stderr)
+            log_event(_log, logging.WARNING, source_id=_idx, event="stream_reconnect",
+                      detail=f"pad link returned {ret} — likely RTCP, ignoring")
 
     source.connect("pad-added", _on_pad_added)
     return queue
@@ -364,8 +371,11 @@ def run(config: MultiStreamConfig) -> None:
     import numpy as np
     import cv2
     from metrics.csv_sink import CsvSink
+    from metrics.health_monitor import HealthMonitor
     from metrics.perf_monitor import PerfMonitor, sample_rss_mb, sample_vram_mb
     from pipelines.anonymisation import blur_bboxes
+
+    configure_pipeline_logging()
     pipeline = build_pipeline(config)
     loop = GLib.MainLoop()
 
@@ -376,6 +386,7 @@ def run(config: MultiStreamConfig) -> None:
 
     n = len(config.uris)
     frame_counts = {i: 0 for i in range(n)}
+    health_monitor = HealthMonitor(num_sources=n, expected_fps=25.0)
 
     # Decode probe on the nvinfer SRC pad — fires once per batched buffer before
     # the tracker. Reads NvDsInferTensorMeta (exposed because output-tensor-meta=1
@@ -495,6 +506,7 @@ def run(config: MultiStreamConfig) -> None:
             source_id = frame_meta.source_id
             frame_counts[source_id] = frame_counts.get(source_id, 0) + 1
             detections = _parse_frame_detections(frame_meta)
+            health_monitor.record_frame(source_id, t=time.monotonic(), has_detection=bool(detections))
 
             # Optional: blur bboxes in-place on the NVMM surface before OSD draws
             if config.anonymise and detections:
@@ -535,14 +547,36 @@ def run(config: MultiStreamConfig) -> None:
             counts = dict(frame_counts)
             perf_monitor.record(t=now - _perf_start, frame_counts=counts, vram_mb=vram, rss_mb=rss)
             fps_per = sum(counts.values()) / n / dt if dt > 0 and n > 0 else 0.0
-            print(f"[perf] t={dt:.0f}s fps/stream={fps_per:.1f} vram={vram:.0f}MB rss={rss:.0f}MB", flush=True)
+            log_event(_log, logging.INFO, event="perf_tick", t_s=round(dt),
+                      fps_per_stream=round(fps_per, 1), vram_mb=round(vram), rss_mb=round(rss))
             return True  # keep firing
 
         GLib.timeout_add_seconds(int(config.perf_interval), _perf_tick)
 
+    # Health monitoring — always-on, fires every health_interval_s seconds
+    _health_interval_s = max(5, int(config.perf_interval))
+
+    def _health_tick():
+        snap = health_monitor.snapshot(
+            t_now=time.monotonic(),
+            vram_mb=sample_vram_mb(),
+            rss_mb=sample_rss_mb(),
+        )
+        log_event(_log, logging.INFO, event="health_tick",
+                  sources=snap["sources"], system=snap.get("system"))
+        for src in snap["sources"]:
+            if not src["is_live"]:
+                log_event(_log, logging.WARNING, source_id=src["source_id"],
+                          event="source_stalled",
+                          time_since_last_frame_s=src["time_since_last_frame_s"])
+        return True  # keep firing
+
+    GLib.timeout_add_seconds(_health_interval_s, _health_tick)
+
     if config.duration:
         def _on_duration_timeout():
-            print(f"[pipeline] --duration {config.duration}s elapsed — stopping")
+            log_event(_log, logging.INFO, event="pipeline_stop",
+                      reason="duration_elapsed", duration_s=config.duration)
             loop.quit()
             return False
 
@@ -554,17 +588,17 @@ def run(config: MultiStreamConfig) -> None:
     def _on_message(_, msg):
         t = msg.type
         if t == Gst.MessageType.EOS:
-            print("EOS received — stopping pipeline")
+            log_event(_log, logging.INFO, event="pipeline_eos")
             loop.quit()
         elif t == Gst.MessageType.ERROR:
             err, debug = msg.parse_error()
-            print(f"Pipeline error: {err.message} ({debug})", file=sys.stderr)
+            log_event(_log, logging.ERROR, event="pipeline_error", msg=err.message, debug=debug)
             loop.quit()
 
     bus.connect("message", _on_message)
 
     def _on_sigint(_sig, _frame):
-        print("\nInterrupted — stopping pipeline")
+        log_event(_log, logging.INFO, event="pipeline_stop", reason="sigint")
         loop.quit()
 
     signal.signal(signal.SIGINT, _on_sigint)
@@ -574,8 +608,8 @@ def run(config: MultiStreamConfig) -> None:
     if ret == Gst.StateChangeReturn.FAILURE:
         raise RuntimeError("Failed to set pipeline to PLAYING")
 
-    uris_str = ", ".join(config.uris)
-    print(f"Pipeline running — sources: {uris_str}  output_dir: {config.output_dir}")
+    log_event(_log, logging.INFO, event="pipeline_start",
+              uris=config.uris, output_dir=config.output_dir)
     try:
         loop.run()
     finally:

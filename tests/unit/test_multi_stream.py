@@ -181,3 +181,61 @@ def test_build_pipeline_has_no_sync():
     import inspect
     from pipelines.multi_stream import build_pipeline
     assert "sync" in inspect.getsource(build_pipeline)
+
+
+# ---------------------------------------------------------------------------
+# M3.6.1 — Structured logging wired into run()
+# ---------------------------------------------------------------------------
+
+
+def test_run_uses_configure_pipeline_logging():
+    import inspect
+    from pipelines.multi_stream import run
+    assert "configure_pipeline_logging" in inspect.getsource(run)
+
+
+def test_run_emits_pipeline_start_event():
+    import inspect
+    from pipelines.multi_stream import run
+    assert "pipeline_start" in inspect.getsource(run)
+
+
+def test_run_emits_pipeline_eos_event():
+    import inspect
+    from pipelines.multi_stream import run
+    assert "pipeline_eos" in inspect.getsource(run)
+
+
+def test_run_emits_pipeline_error_event():
+    import inspect
+    from pipelines.multi_stream import run
+    assert "pipeline_error" in inspect.getsource(run)
+
+
+# ---------------------------------------------------------------------------
+# M3.6.2 — HealthMonitor wired into run()
+# ---------------------------------------------------------------------------
+
+
+def test_run_creates_health_monitor():
+    import inspect
+    from pipelines.multi_stream import run
+    assert "HealthMonitor" in inspect.getsource(run)
+
+
+def test_run_records_health_frame_in_probe():
+    import inspect
+    from pipelines.multi_stream import run
+    assert "record_frame" in inspect.getsource(run)
+
+
+def test_run_emits_health_tick_event():
+    import inspect
+    from pipelines.multi_stream import run
+    assert "health_tick" in inspect.getsource(run)
+
+
+def test_run_warns_on_source_stalled():
+    import inspect
+    from pipelines.multi_stream import run
+    assert "source_stalled" in inspect.getsource(run)
