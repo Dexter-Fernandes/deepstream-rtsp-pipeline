@@ -375,7 +375,6 @@ def run(config: MultiStreamConfig) -> None:
     from metrics.perf_monitor import PerfMonitor, sample_rss_mb, sample_vram_mb
     from pipelines.anonymisation import blur_bboxes
 
-    configure_pipeline_logging()
     pipeline = build_pipeline(config)
     loop = GLib.MainLoop()
 
