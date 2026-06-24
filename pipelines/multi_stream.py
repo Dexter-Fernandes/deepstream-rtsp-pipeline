@@ -1,16 +1,22 @@
 import argparse
 import ctypes
+import logging
 import signal
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from pipelines.structured_log import configure_pipeline_logging, get_pipeline_logger, log_event
+
+configure_pipeline_logging()
+_log = get_pipeline_logger("multi_stream")
 
 _PLUGIN_LIB = Path("/opt/ds_plugins/libyolo26_decode.so")
 if _PLUGIN_LIB.exists():
     ctypes.CDLL(str(_PLUGIN_LIB), ctypes.RTLD_GLOBAL)
-    print(f"[pipeline] Loaded TRT plugin: {_PLUGIN_LIB}", flush=True)
+    log_event(_log, logging.INFO, event="plugin_loaded", plugin=str(_PLUGIN_LIB))
 else:
-    print(f"[pipeline] WARNING: plugin lib not found at {_PLUGIN_LIB} — decode engine will fail", flush=True)
+    log_event(_log, logging.WARNING, event="plugin_missing", plugin=str(_PLUGIN_LIB),
+              detail="decode engine will fail if plugin is required")
 
 
 @dataclass
@@ -25,6 +31,11 @@ class MultiStreamConfig:
     restream_base_port: int | None = None
     anonymise: bool = False
     conf_threshold: float = 0.25
+    tracker_config: str = "configs/tracker_nvdcf.yml"
+    perf_json: str | None = None
+    perf_interval: float = 5.0
+    duration: int | None = None
+    no_sync: bool = False
 
 
 def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
@@ -36,6 +47,16 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
     parser.add_argument("--restream-base-port", type=int, default=None, dest="restream_base_port", help="Base port for nvrtspoutsinkbin (stream0=base, stream1=base+1, ...)")
     parser.add_argument("--anonymise", action="store_true", dest="anonymise", help="Enable blur anonymisation")
     parser.add_argument("--conf-threshold", type=float, default=0.25, dest="conf_threshold", help="Detection confidence threshold (default: 0.25)")
+    parser.add_argument(
+        "--tracker",
+        default="configs/tracker_nvdcf.yml",
+        dest="tracker_config",
+        help="Path to nvtracker YAML config (tracker_iou.yml / tracker_nvdcf.yml / tracker_bytetrack.yml)",
+    )
+    parser.add_argument("--perf-json", default=None, dest="perf_json", metavar="PATH", help="Write perf JSON to PATH (enables monitoring)")
+    parser.add_argument("--perf-interval", type=float, default=5.0, dest="perf_interval", metavar="SECONDS", help="Perf sampling interval in seconds (default: 5.0)")
+    parser.add_argument("--duration", type=int, default=None, dest="duration", metavar="SECONDS", help="Auto-stop after SECONDS (for unattended runs)")
+    parser.add_argument("--no-sync", action="store_true", dest="no_sync", help="Disable sink sync (unthrottled throughput ceiling measurement)")
     args = parser.parse_args(argv)
     return MultiStreamConfig(
         uris=args.uris,
@@ -45,6 +66,11 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
         restream_base_port=args.restream_base_port,
         anonymise=args.anonymise,
         conf_threshold=args.conf_threshold,
+        tracker_config=args.tracker_config,
+        perf_json=args.perf_json,
+        perf_interval=args.perf_interval,
+        duration=args.duration,
+        no_sync=args.no_sync,
     )
 
 
@@ -85,8 +111,69 @@ def _make_nvinfer_config(base_config: str, n: int) -> str:
     return out_path
 
 
+def _is_file_uri(uri: str) -> bool:
+    """A source is treated as a local file unless it's an rtsp:// URI."""
+    return not uri.startswith("rtsp://")
+
+
+def _make_file_source_bin(pipeline, config: MultiStreamConfig, idx: int):
+    """Build filesrc→qtdemux→h264parse→decoder→queue for one MP4 file.
+
+    Used for GT-aligned evaluation: a file source plays from frame 0 and emits
+    EOS after exactly one pass, so prediction frame N maps to GT frame N+1.
+    """
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+
+    path = config.uris[idx]
+    if path.startswith("file://"):
+        path = path[len("file://"):]
+
+    source = Gst.ElementFactory.make("filesrc", f"source_{idx}")
+    demux = Gst.ElementFactory.make("qtdemux", f"qtdemux_{idx}")
+    parser = Gst.ElementFactory.make("h264parse", f"h264parse_{idx}")
+    decoder = Gst.ElementFactory.make("nvv4l2decoder", f"decoder_{idx}")
+    queue = Gst.ElementFactory.make("queue", f"queue_{idx}")
+
+    for name, el in [
+        (f"filesrc_{idx}", source), (f"qtdemux_{idx}", demux),
+        (f"h264parse_{idx}", parser), (f"nvv4l2decoder_{idx}", decoder),
+        (f"queue_{idx}", queue),
+    ]:
+        if not el:
+            raise RuntimeError(f"Could not create GStreamer element: {name}")
+        pipeline.add(el)
+
+    source.set_property("location", path)
+
+    source.link(demux)
+    parser.link(decoder)
+    decoder.link(queue)
+
+    def _on_pad_added(_demux, new_pad, _parser=parser, _idx=idx):
+        sink_pad = _parser.get_static_pad("sink")
+        if sink_pad.is_linked():
+            return
+        caps = new_pad.get_current_caps() or new_pad.query_caps(None)
+        name = caps.to_string() if caps else ""
+        if not name.startswith("video"):
+            return  # skip audio/other tracks
+        new_pad.link(sink_pad)
+
+    demux.connect("pad-added", _on_pad_added)
+    return queue
+
+
 def _make_source_bin(pipeline, config: MultiStreamConfig, idx: int):
-    """Build rtspsrc→depay→decoder→queue for one source and return the queue element."""
+    """Build a source bin and return its queue element.
+
+    Dispatches to a file branch for local MP4s (GT-aligned eval) or an rtsp
+    branch for live streams.
+    """
+    if _is_file_uri(config.uris[idx]):
+        return _make_file_source_bin(pipeline, config, idx)
+
     import gi
     gi.require_version("Gst", "1.0")
     from gi.repository import Gst
@@ -118,7 +205,8 @@ def _make_source_bin(pipeline, config: MultiStreamConfig, idx: int):
             return
         ret = new_pad.link(sink_pad)
         if ret not in (Gst.PadLinkReturn.OK, Gst.PadLinkReturn.WAS_LINKED):
-            print(f"[multi_stream] source {_idx} pad link returned {ret} — likely RTCP, ignoring", file=sys.stderr)
+            log_event(_log, logging.WARNING, source_id=_idx, event="stream_reconnect",
+                      detail=f"pad link returned {ret} — likely RTCP, ignoring")
 
     source.connect("pad-added", _on_pad_added)
     return queue
@@ -168,6 +256,7 @@ def build_pipeline(config: MultiStreamConfig):
         "ll-lib-file",
         "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so",
     )
+    tracker.set_property("ll-config-file", config.tracker_config)
 
     # ── Source bins → mux ────────────────────────────────────────────────────
     # Each bin is: rtspsrc → rtph264depay → nvv4l2decoder → queue
@@ -227,6 +316,8 @@ def build_pipeline(config: MultiStreamConfig):
             if not sink:
                 raise RuntimeError(f"Could not create fakesink for source {i}")
             pipeline.add(sink)
+            if config.no_sync:
+                sink.set_property("sync", False)
 
         demux_src = demux.request_pad_simple(f"src_{i}")
         demux_src.link(queue_out.get_static_pad("sink"))
@@ -271,6 +362,7 @@ def _parse_frame_detections(frame_meta):
 
 def run(config: MultiStreamConfig) -> None:
     import ctypes
+    import time
     import gi
     gi.require_version("Gst", "1.0")
     from gi.repository import Gst, GLib
@@ -279,7 +371,10 @@ def run(config: MultiStreamConfig) -> None:
     import numpy as np
     import cv2
     from metrics.csv_sink import CsvSink
+    from metrics.health_monitor import HealthMonitor
+    from metrics.perf_monitor import PerfMonitor, sample_rss_mb, sample_vram_mb
     from pipelines.anonymisation import blur_bboxes
+
     pipeline = build_pipeline(config)
     loop = GLib.MainLoop()
 
@@ -287,6 +382,10 @@ def run(config: MultiStreamConfig) -> None:
         i: CsvSink(_output_csv_path(config.output_dir, i))
         for i in range(len(config.uris))
     }
+
+    n = len(config.uris)
+    frame_counts = {i: 0 for i in range(n)}
+    health_monitor = HealthMonitor(num_sources=n, expected_fps=25.0)
 
     # Decode probe on the nvinfer SRC pad — fires once per batched buffer before
     # the tracker. Reads NvDsInferTensorMeta (exposed because output-tensor-meta=1
@@ -315,6 +414,11 @@ def run(config: MultiStreamConfig) -> None:
             except StopIteration:
                 break
 
+            # nvinfer runs in output-tensor-meta mode and never marks the frame
+            # as inferred, so nvtracker would skip it and drop every object.
+            # We decode the tensor and inject objects here, so flag it ourselves.
+            frame_meta.bInferDone = 1
+
             user_meta_list = frame_meta.frame_user_meta_list
             while user_meta_list is not None:
                 try:
@@ -336,14 +440,26 @@ def run(config: MultiStreamConfig) -> None:
                         if conf < config.conf_threshold:
                             continue
                         obj_meta = pyds.nvds_acquire_obj_meta_from_pool(batch_meta)
+                        obj_meta.object_id = 0xFFFFFFFFFFFFFFFF  # UNTRACKED_OBJECT_ID — nvtracker assigns a fresh ID
                         obj_meta.unique_component_id = tensor_meta.unique_id
                         obj_meta.confidence = conf
                         obj_meta.class_id = int(tensor[i, 5])
+                        left = float(tensor[i, 0]) * _scale_x
+                        top = float(tensor[i, 1]) * _scale_y
+                        width = float(tensor[i, 2]) * _scale_x
+                        height = float(tensor[i, 3]) * _scale_y
+                        # nvtracker associates on detector_bbox_info.org_bbox_coords,
+                        # not rect_params — must populate both or it drops the object.
+                        bbox = obj_meta.detector_bbox_info.org_bbox_coords
+                        bbox.left = left
+                        bbox.top = top
+                        bbox.width = width
+                        bbox.height = height
                         rect = obj_meta.rect_params
-                        rect.left = float(tensor[i, 0]) * _scale_x
-                        rect.top = float(tensor[i, 1]) * _scale_y
-                        rect.width = float(tensor[i, 2]) * _scale_x
-                        rect.height = float(tensor[i, 3]) * _scale_y
+                        rect.left = left
+                        rect.top = top
+                        rect.width = width
+                        rect.height = height
                         rect.border_width = 3
                         rect.border_color.red = 0.0
                         rect.border_color.green = 1.0
@@ -387,7 +503,9 @@ def run(config: MultiStreamConfig) -> None:
                 break
 
             source_id = frame_meta.source_id
+            frame_counts[source_id] = frame_counts.get(source_id, 0) + 1
             detections = _parse_frame_detections(frame_meta)
+            health_monitor.record_frame(source_id, t=time.monotonic(), has_detection=bool(detections))
 
             # Optional: blur bboxes in-place on the NVMM surface before OSD draws
             if config.anonymise and detections:
@@ -413,23 +531,73 @@ def run(config: MultiStreamConfig) -> None:
         osd_sink_pad = pipeline.get_by_name(f"osd_{i}").get_static_pad("sink")
         osd_sink_pad.add_probe(Gst.PadProbeType.BUFFER, _probe, 0)
 
+    # Optional perf monitoring — enabled only when --perf-json is set
+    perf_monitor = None
+    if config.perf_json:
+        _perf_start = time.time()
+        perf_monitor = PerfMonitor(num_sources=n, start_t=0.0)
+        _prev_counts = {i: 0 for i in range(n)}
+
+        def _perf_tick():
+            now = time.time()
+            dt = now - _perf_start
+            vram = sample_vram_mb()
+            rss = sample_rss_mb()
+            counts = dict(frame_counts)
+            perf_monitor.record(t=now - _perf_start, frame_counts=counts, vram_mb=vram, rss_mb=rss)
+            fps_per = sum(counts.values()) / n / dt if dt > 0 and n > 0 else 0.0
+            log_event(_log, logging.INFO, event="perf_tick", t_s=round(dt),
+                      fps_per_stream=round(fps_per, 1), vram_mb=round(vram), rss_mb=round(rss))
+            return True  # keep firing
+
+        GLib.timeout_add_seconds(int(config.perf_interval), _perf_tick)
+
+    # Health monitoring — always-on, fires every health_interval_s seconds
+    _health_interval_s = max(5, int(config.perf_interval))
+
+    def _health_tick():
+        snap = health_monitor.snapshot(
+            t_now=time.monotonic(),
+            vram_mb=sample_vram_mb(),
+            rss_mb=sample_rss_mb(),
+        )
+        log_event(_log, logging.INFO, event="health_tick",
+                  sources=snap["sources"], system=snap.get("system"))
+        for src in snap["sources"]:
+            if not src["is_live"]:
+                log_event(_log, logging.WARNING, source_id=src["source_id"],
+                          event="source_stalled",
+                          time_since_last_frame_s=src["time_since_last_frame_s"])
+        return True  # keep firing
+
+    GLib.timeout_add_seconds(_health_interval_s, _health_tick)
+
+    if config.duration:
+        def _on_duration_timeout():
+            log_event(_log, logging.INFO, event="pipeline_stop",
+                      reason="duration_elapsed", duration_s=config.duration)
+            loop.quit()
+            return False
+
+        GLib.timeout_add_seconds(config.duration, _on_duration_timeout)
+
     bus = pipeline.get_bus()
     bus.add_signal_watch()
 
     def _on_message(_, msg):
         t = msg.type
         if t == Gst.MessageType.EOS:
-            print("EOS received — stopping pipeline")
+            log_event(_log, logging.INFO, event="pipeline_eos")
             loop.quit()
         elif t == Gst.MessageType.ERROR:
             err, debug = msg.parse_error()
-            print(f"Pipeline error: {err.message} ({debug})", file=sys.stderr)
+            log_event(_log, logging.ERROR, event="pipeline_error", msg=err.message, debug=debug)
             loop.quit()
 
     bus.connect("message", _on_message)
 
     def _on_sigint(_sig, _frame):
-        print("\nInterrupted — stopping pipeline")
+        log_event(_log, logging.INFO, event="pipeline_stop", reason="sigint")
         loop.quit()
 
     signal.signal(signal.SIGINT, _on_sigint)
@@ -439,14 +607,25 @@ def run(config: MultiStreamConfig) -> None:
     if ret == Gst.StateChangeReturn.FAILURE:
         raise RuntimeError("Failed to set pipeline to PLAYING")
 
-    uris_str = ", ".join(config.uris)
-    print(f"Pipeline running — sources: {uris_str}  output_dir: {config.output_dir}")
+    log_event(_log, logging.INFO, event="pipeline_start",
+              uris=config.uris, output_dir=config.output_dir)
     try:
         loop.run()
     finally:
         pipeline.set_state(Gst.State.NULL)
         for sink in csv_sinks.values():
             sink.close()
+        if perf_monitor is not None and config.perf_json:
+            # Flush a final sample so short runs (EOS before first tick) have data
+            now = time.time()
+            perf_monitor.record(
+                t=now - _perf_start,
+                frame_counts=dict(frame_counts),
+                vram_mb=sample_vram_mb(),
+                rss_mb=sample_rss_mb(),
+            )
+            perf_monitor.write_json(config.perf_json)
+            perf_monitor.print_summary()
 
 
 if __name__ == "__main__":

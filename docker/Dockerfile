@@ -35,6 +35,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install opencv-python-headless ultralytics
 
+# motmetrics for M3.2 tracker evaluation (MOTA/MOTP/IDF1)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install motmetrics
+
 # Compile yolo26_decode TRT plugin (SM 75 = GTX 1660 Ti).
 # The .so is baked into the image so init_models.py can build the decode
 # engine on first container start without any manual pre-steps.

@@ -1,0 +1,47 @@
+{
+  "n_frames": 1050,
+  "seq_dir": "/datasets/MOT17/train/MOT17-04-SDP/img1",
+  "engines": {
+    "fp32": {
+      "engine": "models/engines/yolo26n_fp32_b3.engine",
+      "total_detections": 11804,
+      "mean_per_frame": 11.24
+    },
+    "fp16": {
+      "engine": "models/engines/yolo26n_fp16_b3.engine",
+      "total_detections": 11766,
+      "mean_per_frame": 11.21
+    },
+    "decode": {
+      "engine": "models/engines/yolo26n_fp16_b3_decode.engine",
+      "total_detections": 11761,
+      "mean_per_frame": 11.2
+    }
+  },
+  "fp16_vs_fp32": {
+    "mean_iou": 0.993687,
+    "n_matched": 11690,
+    "n_dropped": 76,
+    "n_added": 114,
+    "max_conf_delta": 0.441853,
+    "match_rate": 0.9903
+  },
+  "decode_vs_python": {
+    "n_matched": 11693,
+    "per_coord_max_delta_px": {
+      "left": 1.0,
+      "top": 3.75,
+      "width": 1.0,
+      "height": 14.0
+    },
+    "max_coord_delta_px": 14.0,
+    "mean_coord_delta_px": 0.041068,
+    "p99_coord_delta_px": 0.5,
+    "coord_epsilon_px": 1.0,
+    "within_epsilon": true
+  },
+  "summary": {
+    "fp16_vs_fp32": "mean IoU 0.9937 across 11690 matched boxes; 76 dropped, 114 added (11804 FP32 detections, 11766 FP16); max confidence delta 0.4419",
+    "decode_vs_python": "max coordinate delta 14.0000px (2.188% of 640px input) over 11693 matched boxes; per-coord: left=1.0000, top=3.7500, width=1.0000, height=14.0000; within 1.0px tolerance: True"
+  }
+}

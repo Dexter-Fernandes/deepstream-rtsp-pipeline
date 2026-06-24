@@ -1,0 +1,51 @@
+%YAML:1.0
+# NvDCF tracker — discriminative correlation filter with appearance features.
+# Cascaded matcher + visual similarity; costs extra VRAM for feature maps.
+# featureImgSizeLevel: 2 balances accuracy vs VRAM on GTX 1660 Ti.
+
+BaseConfig:
+  minDetectorConfidence: 0.25    # matches --conf-threshold default
+
+TargetManagement:
+  enableBboxUnClipping: 1
+  maxTargetsPerStream: 150
+  minIouDiff4NewTarget: 0.7418
+  minTrackerConfidence: 0.4009
+  probationAge: 1
+  maxShadowTrackingAge: 51
+  earlyTerminationAge: 1
+
+TrajectoryManagement:
+  useUniqueID: 0
+
+DataAssociator:
+  dataAssociatorType: 0
+  associationMatcherType: 1      # CASCADED
+  checkClassMatch: 1
+  minMatchingScore4Overall: 0.4290
+  minMatchingScore4SizeSimilarity: 0.3627
+  minMatchingScore4Iou: 0.2575
+  minMatchingScore4VisualSimilarity: 0.5356
+  matchingScoreWeight4VisualSimilarity: 0.3370
+  matchingScoreWeight4SizeSimilarity: 0.4354
+  matchingScoreWeight4Iou: 0.3656
+  tentativeDetectorConfidence: 0.2008
+  minMatchingScore4TentativeIou: 0.5296
+
+StateEstimator:
+  stateEstimatorType: 1          # SIMPLE Kalman filter
+  processNoiseVar4Loc: 1.5110
+  processNoiseVar4Size: 1.3159
+  processNoiseVar4Vel: 0.0300
+  measurementNoiseVar4Detector: 3.0283
+  measurementNoiseVar4Tracker: 8.1505
+
+VisualTracker:
+  visualTrackerType: 2           # NvDCF_VPI
+  useColorNames: 1
+  useHog: 0
+  featureImgSizeLevel: 2         # 128×128 — balanced for 1660 Ti
+  featureFocusOffsetFactor_y: -0.2000
+  filterLr: 0.0750
+  filterChannelWeightsLr: 0.1000
+  gaussianSigma: 0.7500

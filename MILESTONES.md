@@ -149,7 +149,7 @@
 - [x] Note in commentary: real-time budget is violated by the tail, not the mean
 
 ### M2.7.3 — End-to-end pipeline framing
-- [x] Add a note distinguishing standalone `trtexec` numbers from full DeepStream throughput (`nvinfer` + `nvtracker` + OSD + re-stream consume the 3.8 ms headroom); defer measured end-to-end FPS to M3.3
+- [x] Add a note distinguishing standalone `trtexec` numbers from full DeepStream throughput (`nvinfer` + `nvtracker` + OSD + re-stream consume the 3.8 ms headroom); end-to-end FPS measured in M3.3 (131.3 FPS/stream unthrottled; 25 FPS/stream live; 7% overhead)
 - [x] INT8 as a third precision point deferred — see Stretch Goals (1660 Ti has no Tensor Cores; INT8 via DP4A possible but accuracy/speed trade-off better shown on RTX/Jetson)
 
 ---
@@ -158,43 +158,49 @@
 
 **Exit criteria:** tracker comparison report with full MOTA/HOTA/IDF1; multi-stream benchmarking complete; all tests passing; docs complete.
 
-### M3.1 — Tracker Configs
-- [ ] Write `configs/tracker_iou.yml` (IOU tracker config for DeepStream)
-- [ ] Write `configs/tracker_nvdcf.yml` (NvDCF config)
-- [ ] Write `configs/tracker_bytetrack.yml` (ByteTrack config)
-- [ ] Add `--tracker` CLI flag to `pipelines/rtsp.py` to swap configs without code change
-- [ ] Run each tracker on MOT17-04 on all frames; save separate CSV per tracker
+### M3.1 — Tracker Configs ✓
+- [x] Write `configs/tracker_iou.yml` (IOU tracker config for DeepStream)
+- [x] Write `configs/tracker_nvdcf.yml` (NvDCF config)
+- [x] Write `configs/tracker_bytetrack.yml` (ByteTrack-inspired via NvSORT — DS 9.0 has no native ByteTrack; cascaded matcher + low minDetectorConfidence replicates two-stage association)
+- [x] Add `--tracker` CLI flag to `pipelines/rtsp.py` and `pipelines/multi_stream.py` to swap configs without code change; `tracker_config` field on both config dataclasses (6 new unit tests, 120 total)
+- [x] Run each tracker on MOT17-04; CSVs confirmed populated in `metrics/tracker_results/{iou,nvdcf,bytetrack}/output_stream0.csv`
 
-### M3.2 — Tracker Metrics (py-motmetrics)
-- [ ] Install `py-motmetrics` in container
-- [ ] Write `metrics/evaluate_tracker.py`: load MOT17-04 GT + pipeline CSV → compute MOTA, MOTP, HOTA, IDF1
-- [ ] Add no-GT metrics: parse CSV for ID switches, track fragmentation, mean FPS, peak VRAM
-- [ ] Produce `metrics/tracker_comparison.ipynb` with full comparison table
+### M3.2 — Tracker Metrics (py-motmetrics) ✓
+- [x] Install `py-motmetrics` in container (`docker/Dockerfile`; v1.4.0)
+- [x] Write `metrics/evaluate_tracker.py`: load MOT17-04 GT + pipeline CSV → compute MOTA, MOTP, IDF1, ID-switches, fragmentations (HOTA deferred — not in py-motmetrics; needs TrackEval)
+- [x] Add no-GT metrics: unique-track count + per-frame detection counts from CSV (FPS/VRAM belong to M3.3 end-to-end profiling)
+- [x] Produce `metrics/tracker_comparison.ipynb` with comparison table + bar charts (executed, outputs embedded)
+- [x] **Pipeline fix (prereq):** probe-injected objects were silently dropped by `nvtracker` — fixed by setting `frame_meta.bInferDone=1`, populating `detector_bbox_info.org_bbox_coords`, and `object_id=UNTRACKED_OBJECT_ID`. Added file-input source branch to `multi_stream.py` for GT-aligned eval (`--uri data/mot17_04.mp4` plays from frame 0). Regression tests added.
 
-### M3.3 — Live Pipeline End-to-End + Stability
+### M3.3 — Live Pipeline End-to-End + Stability ✓
 > Synthetic batch profiling (trtexec, 1/2/3/25/33/100) is done in M2.5/M2.6. This milestone measures the **real DeepStream pipeline** — `nvinfer` + `nvtracker` + OSD + re-stream — which the standalone-kernel numbers don't capture (gap flagged in M2.6.3).
-- [ ] Measure true end-to-end FPS on the live 3-stream pipeline (full graph, not standalone TRT); compare against the trtexec ceiling to quantify pipeline overhead
-- [ ] 30-minute stability run on all three streams; confirm no crash and no memory leak (sample RSS + VRAM over the run)
-- [ ] Record per-stream FPS and aggregate VRAM during sustained 3-stream load
-- [ ] Document the standalone-vs-end-to-end throughput gap in README
+- [x] Measure true end-to-end FPS on the live 3-stream pipeline (full graph, not standalone TRT); compare against the trtexec ceiling to quantify pipeline overhead (131.3 FPS/stream unthrottled vs 140.9 trtexec; 7% full-graph overhead)
+- [x] 30-minute stability run on all three streams; confirm no crash and no memory leak (RSS drift < 12 MB / 30 min; `leak_suspected=false`)
+- [x] Record per-stream FPS and aggregate VRAM during sustained 3-stream load (live: 29.7 FPS/stream; unthrottled: 131.3 FPS/stream; VRAM peak 781 MB unthrottled / 1 632 MB live; RSS −260 MB over 30 min — no leak)
+- [x] Document the standalone-vs-end-to-end throughput gap in README (end-to-end table added; deferral removed)
+- [x] `metrics/perf_monitor.py` — CPU-safe FPS/RSS/VRAM module with 21 unit tests (TDD slices 1–6)
+- [x] `pipelines/multi_stream.py` — `--perf-json`, `--perf-interval`, `--duration`, `--no-sync` flags; frame counter in `_probe`; GLib periodic sampler + duration timeout; JSON write in `finally`
+- [x] `metrics/stability_run.sh` — 30-min live RTSP driver (configurable via `DURATION=` env var)
+- [x] `metrics/throughput_run.sh` — 120 s unthrottled file-source ceiling driver with nvidia-smi poller
+- [x] `metrics/stability.ipynb` — 4-cell executed notebook: FPS adherence / RSS+VRAM stability / ceiling-vs-trtexec bar chart / commentary
 
-### M3.4 — GPU Tests + CI
-- [ ] Write `tests/smoke/test_pipeline_smoke.py` — launch rtsp pipeline for 10 seconds, assert frames_processed > 0 and CSV non-empty (requires GPU, `pytest --gpu`)
-- [ ] Write `tests/integration/test_motmetrics_integration.py` — run metrics on known MOT17-04 excerpt, assert HOTA within expected range (requires GPU, `pytest --gpu`)
-- [ ] Wire GitHub Actions workflow for unit tests (CPU only, no GPU runner)
-- [ ] Model-promotion gate (MLOps): version engines with a manifest (model hash, precision, build flags, accuracy snapshot); reuse the M2.6.1 detection-comparison harness as a regression check that blocks a new engine from fleet rollout if box IoU / mAP drops below threshold vs the current production engine
+### M3.4 — GPU Tests + CI ✓
+- [x] Write `tests/smoke/test_pipeline_smoke.py` — 3 GPU smoke tests (exit clean, frames > 0, CSV written); subprocess-based, `@pytest.mark.gpu`; skipped in CPU CI via root `conftest.py`
+- [x] Write `tests/integration/test_motmetrics_integration.py` — MOTA > -0.5 and IDF1 > 0 on MOT17-04 excerpt; MOTA/IDF1 asserted (HOTA not in py-motmetrics — deferred in M3.2)
+- [x] Wire GitHub Actions workflow for unit tests — `.github/workflows/unit-tests.yml`; ubuntu-latest, Python 3.12, `pytest tests/unit/ -q`; GPU tests auto-skipped (no `--gpu` flag in CI)
+- [x] Model-promotion gate — `metrics/model_gate.py`; reads `validate_accuracy.py` JSON; checks `match_rate ≥ 0.95` AND `mean_iou ≥ 0.95`; writes signed manifest (SHA-256 + timestamp); exits 0/1 for shell/CI use; 19 CPU-safe unit tests in `tests/unit/test_model_gate.py`
 
-### M3.5 — Docs + README
-- [ ] Write `docs/jetson-upgrade.md` — component diff table: x86 dGPU config → Jetson equivalent (nvargus, JetPack, INT8, unified memory, TDP modes)
-- [ ] Write `docs/isp-and-camera-input.md` — **substantial** treatment, not a footnote (this is a full JD hard requirement: "Optical performance, ISPs, Camera tuning"). Cover: full ISP pipeline (demosaicing, AWB, denoise, gamma, lens distortion correction), `nvargus`/Argus CSI capture path on Jetson, how ISP misconfiguration (white balance, exposure, sharpening) degrades detection accuracy, and camera-tuning trade-offs for traffic scenes (night/glare/motion blur). Note explicitly: cannot be exercised on x86 dGPU (no CSI/Argus) — doc-only by hardware ceiling; lean on this in the system-design interview
-- [ ] Write `docs/system-design.md` — fleet-scale architecture: 1→5000 sensors, edge→cloud metadata path, sensor failure/reconnect, JetPack fleet upgrade strategy
-- [ ] Complete README: architecture diagram, quickstart, tracker comparison table summary, decode plugin results, known gaps with explicit reasoning, Privacy by Design section
-- [ ] Final 30-minute stability run on RTSP pipeline; confirm no crash/leak
+### M3.5 — Docs + README ✓
+- [x] Write `docs/jetson-upgrade.md` — component diff table: x86 dGPU config → Jetson equivalent (nvargus, JetPack, INT8, unified memory, TDP modes)
+- [x] Write `docs/isp-and-camera-input.md` — **substantial** treatment, not a footnote (this is a full JD hard requirement: "Optical performance, ISPs, Camera tuning"). Cover: full ISP pipeline (demosaicing, AWB, denoise, gamma, lens distortion correction), `nvargus`/Argus CSI capture path on Jetson, how ISP misconfiguration (white balance, exposure, sharpening) degrades detection accuracy, and camera-tuning trade-offs for traffic scenes (night/glare/motion blur). Note explicitly: cannot be exercised on x86 dGPU (no CSI/Argus) — doc-only by hardware ceiling; lean on this in the system-design interview
+- [x] Write `docs/system-design.md` — fleet-scale architecture: 1→5000 sensors, edge→cloud metadata path, sensor failure/reconnect, JetPack fleet upgrade strategy
+- [x] Complete README: tracker comparison section, end-to-end FPS table, known gaps with reasoning, roadmap status, real measured numbers throughout
+- [x] Final 30-minute stability run on RTSP pipeline; confirm no crash/leak (peak VRAM 1,632 MB; RSS −260 MB; `leak_suspected=false`)
 
 ### M3.6 — Observability & Reactive Debugging
 > Maps to the JD's "Reactive Debugging and Support" (15% of the role) and "make systems more robust." Nothing else in M1–M3 addresses how you *notice* and *diagnose* a degraded sensor.
-- [ ] Structured logging across the pipeline (per-stream source_id, frame counts, FPS, dropped frames, reconnect events) — machine-parseable, not print statements
-- [ ] Per-sensor health metrics: liveness, current FPS vs expected, time-since-last-detection, VRAM/RSS; expose as a simple JSON/Prometheus-style endpoint or periodic log line
+- [x] Structured logging across the pipeline (per-stream source_id, frame counts, FPS, dropped frames, reconnect events) — machine-parseable JSON-line records via `pipelines/structured_log.py`; all `print()` replaced with levelled `log_event()` calls (DEBUG/INFO/WARNING/ERROR); 8 CPU-safe unit tests
+- [x] Per-sensor health metrics: liveness, current FPS vs expected, time-since-last-detection, VRAM/RSS; `metrics/health_monitor.py` — `HealthMonitor` with `record_frame()` probe wiring + `_health_tick()` GLib callback emitting periodic `health_tick` JSON log line and `WARNING source_stalled` for dead streams; 12 CPU-safe unit tests
 - [ ] Failure-mode playbook in `docs/`: how to diagnose a stuck stream, a silently-degraded detector (FPS fine but detections wrong), an OOM, and a sensor that reconnects but produces no metadata
 - [ ] Demonstrate one debugging walkthrough end-to-end (inject a fault, show how the logs/metrics surface it)
 

@@ -16,6 +16,7 @@ class PipelineConfig:
     output_csv: str = "output.csv"
     restream_uri: str | None = None
     anonymise: bool = False
+    tracker_config: str = "configs/tracker_iou.yml"
 
 
 def parse_args(argv: list[str] | None = None) -> PipelineConfig:
@@ -35,6 +36,12 @@ def parse_args(argv: list[str] | None = None) -> PipelineConfig:
     parser.add_argument("--output", default="output.csv", dest="output_csv", help="CSV output path")
     parser.add_argument("--restream-uri", default=None, dest="restream_uri", help="RTSP URI to re-stream blurred output")
     parser.add_argument("--anonymise", action="store_true", dest="anonymise", help="Enable blur anonymisation")
+    parser.add_argument(
+        "--tracker",
+        default="configs/tracker_iou.yml",
+        dest="tracker_config",
+        help="Path to nvtracker YAML config (tracker_iou.yml / tracker_nvdcf.yml / tracker_bytetrack.yml)",
+    )
     args = parser.parse_args(argv)
     return PipelineConfig(
         uri=args.uri,
@@ -43,6 +50,7 @@ def parse_args(argv: list[str] | None = None) -> PipelineConfig:
         output_csv=args.output_csv,
         restream_uri=args.restream_uri,
         anonymise=args.anonymise,
+        tracker_config=args.tracker_config,
     )
 
 
@@ -117,6 +125,7 @@ def build_pipeline(config: PipelineConfig):
         "ll-lib-file",
         "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so",
     )
+    tracker.set_property("ll-config-file", config.tracker_config)
 
     # rtspsrc has dynamic src pads; link the rest of the chain statically
     depay.link(decoder)

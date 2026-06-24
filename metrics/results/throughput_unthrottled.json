@@ -1,0 +1,37 @@
+{
+  "summary": {
+    "mean_fps_per_source": 129.40134392288513,
+    "fps_total": 388.2040317686554,
+    "peak_vram_mb": 795.0,
+    "mean_vram_mb": 625.5,
+    "rss_start_mb": 1053.0859375,
+    "rss_end_mb": 931.40625,
+    "rss_delta_mb": -121.6796875,
+    "rss_slope_mb_per_min": -2439.7261666615145,
+    "leak_suspected": false,
+    "duration_s": 8.1142897605896,
+    "total_frames": 3150
+  },
+  "samples": [
+    {
+      "t": 5.121830463409424,
+      "frame_counts": {
+        "0": 622,
+        "1": 622,
+        "2": 622
+      },
+      "vram_mb": 795.0,
+      "rss_mb": 1053.0859375
+    },
+    {
+      "t": 8.1142897605896,
+      "frame_counts": {
+        "0": 1050,
+        "1": 1050,
+        "2": 1050
+      },
+      "vram_mb": 456.0,
+      "rss_mb": 931.40625
+    }
+  ]
+}

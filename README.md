@@ -7,10 +7,11 @@ NVIDIA DeepStream pipeline running three concurrent RTSP streams through GPU-acc
 - Three RTSP sources batched through a single `nvstreammux`, demuxed back per-source for independent OSD and restream output
 - YOLO26n FP16 running end-to-end: `.pt → ONNX (dynamic batch) → TRT FP16` via `trtexec`; Python tensor-meta probe decodes `[300, 6]` output and populates `NvDsObjectMeta` without a compiled C parser
 - `IPluginV2DynamicExt` CUDA kernel appended to the TRT network via TRT Python API; converts xyxy→xywh on GPU inside TRT, replacing the Python coordinate-transform loop; `metrics/profile_decode.py` isolates per-layer latency via `IProfiler`
-- 114 CPU-safe unit tests written before implementation (red→green); no GPU required for the test suite
+- 221 CPU-safe unit tests written before implementation (red→green); no GPU required for the test suite
 - Gaussian blur applied to every detected bbox region before `nvdsosd` renders or any output leaves the pipeline
 - FP32 vs FP16 vs FP16+decode-plugin compared on latency, VRAM, engine size, and fleet OTA cost; batch sweep 1–100 against a 25 fps real-time budget with fleet-sizing projections (`metrics/decode_comparison.ipynb`)
 - Per-frame CSV sink; mediamtx-served MOT17 sequences as the RTSP source (MOT17-04 has ground truth for MOTA/HOTA/IDF1 tracker evaluation)
+- Structured JSON-line logging (`pipelines/structured_log.py`) with per-stream `source_id` on every record; per-sensor health monitor (`metrics/health_monitor.py`) tracks liveness, rolling FPS vs expected, and time-since-last-detection, emitting a `health_tick` log line and `WARNING source_stalled` alerts via a GLib periodic callback
 - NGC DeepStream 9.0 + pyds compiled from source; `docker compose up` handles model export and conversion on first run
 
 ---
@@ -75,7 +76,7 @@ ffplay rtsp://localhost:8558/stream2_out   # YOLO26n boxes on stream2
 
 ```bash
 pip install pytest
-pytest tests/unit/ -v      # 114 tests, CPU-only, no GPU required
+pytest tests/unit/ -v      # 221 tests, CPU-only, no GPU required
 ```
 
 | Module | Tests | What they cover |
@@ -84,8 +85,8 @@ pytest tests/unit/ -v      # 114 tests, CPU-only, no GPU required
 | `csv_sink` | 6 | Header, field values, flush-on-write, multi-detection roundtrip |
 | `anonymisation` | 6 | Blur applied, pixels outside bbox unchanged, out-of-bounds clip |
 | `frame_accessor` | 4 | NVMM surface accessor with injectable `_get_surface` |
-| `rtsp_pipeline` | 14 | Config defaults, arg parsing, source props, restream URI parsing |
-| `multi_stream` | 11 | Multi-URI parsing, CSV path routing, port offset, `_make_nvinfer_config` batch-size + engine path rewrite |
+| `rtsp_pipeline` | 17 | Config defaults, arg parsing, source props, restream URI parsing |
+| `multi_stream` | 38 | Multi-URI parsing, CSV path routing, port offset, `_make_nvinfer_config`; tracker flag; `bInferDone` / `detector_bbox_info` / file-URI regression tests; perf flag defaults + wiring; M3.6 structured-log + health-monitor wiring assertions |
 | `convert` | 14 | `engine_path` naming, `build_trtexec_cmd` flags, dynamic-batch shape profile, `parse_args` |
 | `export_yolo26` | 3 | `parse_args` for weights path and output-dir |
 | `init_models` | 9 | Skip/run logic for all cold-start and warm-start combinations; decode-engine skip/build paths |
@@ -93,8 +94,13 @@ pytest tests/unit/ -v      # 114 tests, CPU-only, no GPU required
 | `decode_engine` | 5 | `decode_engine_path` naming, `parse_args` defaults and flags |
 | `validate_accuracy` | 20 | `box_iou`, greedy IoU matching, per-engine comparison, per-coord decode delta, `preprocess_frame` shape/dtype/range |
 | `profile_decode` | 10 | `_parse_tail_latencies` (min/median/p99/max from trtexec output), `budget_check` (mean+p99 vs frame budget), `_SimpleProfiler.to_dict` tail fields |
+| `evaluate_tracker` | 17 | GT loading (visibility filter), prediction loading (frame-offset), `MOTAccumulator` build, MOTA/MOTP/IDF1 compute, unique-track count |
+| `perf_monitor` | 21 | `compute_interval_fps`, `PerfMonitor.record/summary` (FPS, VRAM, RSS, leak heuristic), `to_dict`/`write_json` round-trip, `sample_rss_mb`, `sample_vram_mb` |
+| `model_gate` | 19 | `match_rate ≥ 0.95` AND `mean_iou ≥ 0.95` gate checks, signed manifest (SHA-256 + timestamp), exit 0/1 for CI |
+| `structured_log` | 8 | JSON formatter, required fields (`ts`/`logger`/`level`/`event`), optional `source_id`, arbitrary extra fields, idempotent `configure_pipeline_logging` |
+| `health_monitor` | 12 | Per-source liveness window, `is_live` flag, rolling FPS, `fps_vs_expected` ratio, `time_since_last_detection_s`, system dict, never-seen-source defaults |
 
-GPU smoke tests (`pytest --gpu`) are planned for M3.4.
+GPU smoke tests: `pytest --gpu` (`tests/smoke/` — requires GPU runner; auto-skipped in CI).
 
 ---
 
@@ -136,7 +142,28 @@ Multi-stream batch sweep (FP16, single `nvstreammux` batch):
 - Consolidating to 15 streams/node cuts a 5,000-camera fleet from 5,000 nodes to 334, a 15× reduction.
 - batch=100 (208 ms) is offline-reprocessing only.
 
-> **Standalone `trtexec` vs full pipeline:** All timings above are pure TRT kernel times. The full DeepStream graph adds scheduling overhead from `nvinfer`, `nvtracker` per-object association, `nvdsosd` composition, RTSP re-stream encode via `nvrtspoutsinkbin`, and GStreamer probe callbacks. These stages share the same 40 ms frame budget, so the 9 ms headroom at batch=15 is a ceiling on what the rest of the pipeline has to fit into. Measured end-to-end FPS for the live 3-stream pipeline is deferred to M3.3.
+**End-to-end pipeline FPS (M3.3)** — measured with the full DeepStream graph (nvinfer → nvtracker → nvdsosd → nvrtspoutsinkbin) on the same GTX 1660 Ti:
+
+| Scenario | FPS / stream | Notes |
+|---|---|---|
+| `trtexec` batch=3 (bare TRT kernel) | **140.9** | Pure inference, no graph overhead |
+| Unthrottled 3× file source | **131.3** | Full graph, `sync=false`; 7% overhead vs bare kernel |
+| Live 3-stream RTSP (30 min, `-re` cap) | **29.7** | Exceeds 25 fps floor; 4.4× headroom vs ceiling |
+
+Full-graph overhead vs the bare TRT kernel is **7 %** (131 vs 140.9 fps/stream) — the IOU tracker, OSD, and Python probe are cheap at this batch size; the main cost is GStreamer scheduling. The live pipeline sustains > 25 fps × 3 streams over 30 minutes with a peak VRAM of **1,632 MB** (IOU tracker) and an RSS that *decreased* by 260 MB over the run (DeepStream releasing initialisation caches) — definitively no memory leak. Full analysis and stability charts in `metrics/stability.ipynb`.
+
+**Tracker comparison (M3.2)** — three `nvtracker` algorithms evaluated on MOT17-04 ground truth (47,557 GT boxes) via `py-motmetrics`. All three see the identical YOLO26n detection stream so differences isolate the tracker, not the detector. Full analysis in `metrics/tracker_comparison.ipynb`.
+
+| Tracker | MOTA ↑ | IDF1 ↑ | ID-switches ↓ | Fragments ↓ | VRAM |
+|---|---|---|---|---|---|
+| IOU (baseline) | 0.118 | 0.127 | 252 | 637 | lowest |
+| NvDCF | **0.138** | **0.257** | 70 | 641 | ~+200 MB (DCF feature maps) |
+| ByteTrack / NvSORT | 0.104 | 0.187 | **37** | **188** | same as IOU |
+
+- **NvDCF** wins on identity (IDF1 2× IOU) — the DCF appearance model re-acquires targets through brief occlusions common in crowded scenes. Recommended where track continuity matters (re-identification, counting across zones).
+- **ByteTrack/NvSORT** has the fewest ID-switches and by far the fewest fragmentations — two-stage cascaded association recovers low-confidence detections, so tracks break far less. Best stability-per-compute trade-off with no appearance model.
+- **IOU** is the fastest and cheapest baseline. No motion or appearance model; identities churn when boxes stop overlapping frame-to-frame.
+- Low absolute MOTA (~0.10–0.14) is expected: YOLO26n-nano recovers only ~11k of 47,557 GT boxes, so MOTA is dominated by missed detections (recall), not tracker quality. The relative ranking is meaningful — all trackers see the same detection stream.
 
 ---
 
@@ -145,17 +172,27 @@ Multi-stream batch sweep (FP16, single `nvstreammux` batch):
 **M1 — Pipeline Plumbing** ✓ *(complete)*
 Three-stream concurrent pipeline; TrafficCamNet ResNet-18 FP32 placeholder; per-source CSV; anonymisation probe; RTSP restream; 47 unit tests.
 
-**M2 — Custom Model + C++ Decode Plugin** *(in progress)*
-YOLO26n FP16 runs end-to-end through DeepStream with a C++ TRT decode plugin. The `IPluginV2DynamicExt` CUDA kernel does the xyxy→xywh coordinate transform on GPU inside TRT; `models/decode_engine.py` builds the plugin-appended engine via TRT Python API. Precision comparison, multi-stream batch sweep (up to 100 streams), accuracy validation against a FP32 baseline, and latency-tail analysis (p99, jitter) are all complete; 114 unit tests. Remaining: M2.6 YOLOv8n heavy-decode plugin (deferrable — M3 tracker work takes priority).
+**M2 — Custom Model + C++ Decode Plugin** ✓ *(mostly complete)*
+YOLO26n FP16 runs end-to-end through DeepStream with a C++ TRT decode plugin. The `IPluginV2DynamicExt` CUDA kernel does the xyxy→xywh coordinate transform on GPU inside TRT; `models/decode_engine.py` builds the plugin-appended engine via TRT Python API. Precision comparison, multi-stream batch sweep (up to 100 streams), accuracy validation against a FP32 baseline, and latency-tail analysis (p99, jitter) are all complete. Deferred: M2.6 YOLOv8n heavy-decode plugin (lower priority than M3; would demonstrate where the DFL+NMS kernel pays off vs YOLO26n's ~0.1 ms overhead).
 
-**M3 — Tracker Comparison + Hardening** *(planned)*
-Three-way tracker comparison (IOU → NvDCF → ByteTrack) with MOTA/HOTA/IDF1 on MOT17-04 ground truth; live end-to-end pipeline FPS + 30-minute stability run; GPU smoke + integration tests; MLOps model-promotion gate (accuracy regression check before fleet rollout); observability + reactive-debugging tooling; `docs/jetson-upgrade.md`, `docs/isp-and-camera-input.md`, `docs/system-design.md`.
+**M3 — Tracker Comparison + Hardening** *(in progress)*
+
+- ✓ **M3.1** — Three tracker configs (IOU / NvDCF / ByteTrack); `--tracker` CLI flag; `probationAge` tuning; tracker CSVs in `metrics/tracker_results/`
+- ✓ **M3.2** — MOTA/MOTP/IDF1 evaluation via `py-motmetrics` on MOT17-04 GT; `metrics/evaluate_tracker.py`; `metrics/tracker_comparison.ipynb` with summary table + bar charts; fixed `bInferDone` / `detector_bbox_info` probe bugs; file-input source branch for GT-aligned eval
+- ✓ **M3.3** — Live end-to-end FPS (131 fps unthrottled / 29.7 fps live) + 30-min stability run; `metrics/perf_monitor.py` (21 CPU-safe tests); `--perf-json / --duration / --no-sync` flags; `metrics/stability.ipynb`
+- ✓ **M3.4** — GPU smoke tests (`tests/smoke/`); motmetrics integration test; GitHub Actions unit-test workflow; model-promotion gate (`metrics/model_gate.py`, 19 CPU-safe tests) with SHA-256 signed manifest and CI exit 0/1
+- ✓ **M3.5** — `docs/jetson-upgrade.md`, `docs/isp-and-camera-input.md`, `docs/system-design.md`; README completeness pass
+- *(in progress)* **M3.6** — Observability / reactive debugging:
+  - ✓ Structured JSON logging (`pipelines/structured_log.py`) — `configure_pipeline_logging` / `get_pipeline_logger` / `log_event`; all pipeline `print()` calls replaced with levelled JSON-line records (DEBUG/INFO/WARNING/ERROR) to stderr; 8 CPU-safe tests
+  - ✓ Per-sensor health metrics (`metrics/health_monitor.py`) — per-source liveness (configurable window), rolling FPS vs expected, time-since-last-detection; `_health_tick` GLib callback emits a `health_tick` JSON line every interval and a `WARNING source_stalled` for any dead stream; 12 CPU-safe tests
+  - ☐ Failure-mode playbook (`docs/`) — how to diagnose stuck stream, silently-degraded detector, OOM, reconnect-but-no-metadata
+  - ☐ End-to-end debugging walkthrough — inject a fault, show how logs/metrics surface it
 
 ---
 
 ## Key design decisions
 
-**`network-type=100` + Python tensor-meta probe for YOLO26n.** nvinfer's built-in bbox parsers expect anchor-based or NMS-post-processed output in a specific layout. YOLO26n's one-to-one matching head emits `[batch, 300, 6]` (end-to-end NMS baked in). Rather than compile a C `.so` custom parser, we use `network-type=100` (custom) with `output-tensor-meta=1`: nvinfer exposes the raw tensor in `NvDsInferTensorMeta` and a Python probe on the nvinfer SRC pad calls `parse_yolo26_output()` and populates `NvDsObjectMeta` directly. The decode logic stays in pure Python, is fully unit-testable without a GPU, and will be replaced by a C++ CUDA kernel in M2.3.
+**`network-type=100` + Python tensor-meta probe for YOLO26n.** nvinfer's built-in bbox parsers expect anchor-based or NMS-post-processed output in a specific layout. YOLO26n's one-to-one matching head emits `[batch, 300, 6]` (end-to-end NMS baked in). Rather than compile a C `.so` custom parser, we use `network-type=100` (custom) with `output-tensor-meta=1`: nvinfer exposes the raw tensor in `NvDsInferTensorMeta` and a Python probe on the nvinfer SRC pad calls `parse_yolo26_output()` and populates `NvDsObjectMeta` directly. The decode logic stays in pure Python, is fully unit-testable without a GPU. M2.3+M2.4 replaced this with the `IPluginV2DynamicExt` CUDA kernel; the Python probe now only reads the already-decoded xywh tensor from `NvDsInferTensorMeta` and populates `NvDsObjectMeta`.
 
 **Dynamic-batch ONNX export.** Exporting with `dynamic=True` makes the batch dimension flexible. `trtexec` is then called with `--minShapes=images:1x3x640x640 --optShapes=images:3x3x640x640 --maxShapes=images:3x3x640x640`, producing a single engine file (`yolo26n_fp16_b3.engine`) that nvinfer can use for any batch size in [1, 3] — both single-stream testing and 3-stream production use the same engine.
 
@@ -175,7 +212,7 @@ Three-way tracker comparison (IOU → NvDCF → ByteTrack) with MOTA/HOTA/IDF1 o
 
 | Gap | Reason | Mitigation |
 |-----|--------|------------|
-| Jetson / nvargus | No Jetson hardware available | `docs/jetson-upgrade.md` (M3.5) — component diff table: x86 dGPU → JetPack |
+| Jetson / nvargus | No Jetson hardware available | `docs/jetson-upgrade.md` — component diff table: x86 dGPU → JetPack; nvargus CSI path; INT8 on Jetson; TDP modes |
 | INT8 quantisation | GTX 1660Ti has no Tensor Cores; INT8 has no hardware speedup | Documented in `models/convert.py`; would enable on Jetson AGX Orin or RTX-class GPU |
 | GPU smoke tests | Require GPU runner; written last to avoid slow CI | Planned M3.4 via `pytest --gpu` and `tests/smoke/` |
 | Decode plugin shows little gain on YOLO26n | YOLO26n is NMS-free (300 pre-decoded boxes), so the kernel does ~0.006 ms of work; the accuracy comparison is between two separately-compiled TRT graphs, not a controlled kernel isolation | M2.6: YOLOv8n plugin (8,400 candidates + DFL + NMS) demonstrates where the pattern pays off |
