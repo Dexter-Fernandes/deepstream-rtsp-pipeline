@@ -149,7 +149,7 @@
 - [x] Note in commentary: real-time budget is violated by the tail, not the mean
 
 ### M2.7.3 — End-to-end pipeline framing
-- [x] Add a note distinguishing standalone `trtexec` numbers from full DeepStream throughput (`nvinfer` + `nvtracker` + OSD + re-stream consume the 3.8 ms headroom); end-to-end FPS measured in M3.3 (131.3 FPS/stream unthrottled; 25 FPS/stream live; 7% overhead)
+- [x] Add a note distinguishing standalone `trtexec` numbers from full DeepStream throughput; end-to-end FPS measured in M3.3 (129.4 FPS/stream unthrottled; 29.7 FPS/stream live; 8.2% overhead vs the 140.9 FPS/stream bare TensorRT ceiling)
 - [x] INT8 as a third precision point deferred — see Stretch Goals (1660 Ti has no Tensor Cores; INT8 via DP4A possible but accuracy/speed trade-off better shown on RTX/Jetson)
 
 ---
@@ -174,9 +174,9 @@
 
 ### M3.3 — Live Pipeline End-to-End + Stability ✓
 > Synthetic batch profiling (trtexec, 1/2/3/25/33/100) is done in M2.5/M2.6. This milestone measures the **real DeepStream pipeline** — `nvinfer` + `nvtracker` + OSD + re-stream — which the standalone-kernel numbers don't capture (gap flagged in M2.6.3).
-- [x] Measure true end-to-end FPS on the live 3-stream pipeline (full graph, not standalone TRT); compare against the trtexec ceiling to quantify pipeline overhead (131.3 FPS/stream unthrottled vs 140.9 trtexec; 7% full-graph overhead)
+- [x] Measure true end-to-end FPS on the live 3-stream pipeline (full graph, not standalone TRT); compare against the trtexec ceiling to quantify pipeline overhead (129.4 FPS/stream unthrottled vs 140.9 trtexec; 8.2% full-graph overhead)
 - [x] 30-minute stability run on all three streams; confirm no crash and no memory leak (RSS drift < 12 MB / 30 min; `leak_suspected=false`)
-- [x] Record per-stream FPS and aggregate VRAM during sustained 3-stream load (live: 29.7 FPS/stream; unthrottled: 131.3 FPS/stream; VRAM peak 781 MB unthrottled / 1 632 MB live; RSS −260 MB over 30 min — no leak)
+- [x] Record per-stream FPS and aggregate VRAM during sustained 3-stream load (live: 29.7 FPS/stream; unthrottled: 129.4 FPS/stream; VRAM peak 795 MB unthrottled / 1,632 MB live; RSS −260 MB over 30 min — no leak detected)
 - [x] Document the standalone-vs-end-to-end throughput gap in README (end-to-end table added; deferral removed)
 - [x] `metrics/perf_monitor.py` — CPU-safe FPS/RSS/VRAM module with 21 unit tests (TDD slices 1–6)
 - [x] `pipelines/multi_stream.py` — `--perf-json`, `--perf-interval`, `--duration`, `--no-sync` flags; frame counter in `_probe`; GLib periodic sampler + duration timeout; JSON write in `finally`
