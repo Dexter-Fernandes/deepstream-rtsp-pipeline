@@ -1,45 +1,83 @@
-# deepstream-rtsp-pipeline
+# Multi-Stream NVIDIA DeepStream Video Analytics
 
-NVIDIA DeepStream pipeline running three concurrent RTSP streams through GPU-accelerated inference, object tracking, and per-source CSV metadata output — built on a GTX 1660Ti (6 GB VRAM) with a full TDD test suite.
+[![Unit Tests](https://github.com/Dexter-Fernandes/deepstream-rtsp-pipeline/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/Dexter-Fernandes/deepstream-rtsp-pipeline/actions/workflows/unit-tests.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-## What this demonstrates
+A reproducible DeepStream 9.0 and GStreamer pipeline that runs detection,
+tracking, anonymisation, health monitoring, metadata extraction, and RTSP
+re-streaming across three concurrent camera feeds. It is measured end to end
+on a GTX 1660 Ti with 6 GB VRAM—not presented as an inference-only model demo.
 
-- Three RTSP sources batched through a single `nvstreammux`, demuxed back per-source for independent OSD and restream output
-- YOLO26n FP16 running end-to-end: `.pt → ONNX (dynamic batch) → TRT FP16` via `trtexec`; Python tensor-meta probe decodes `[300, 6]` output and populates `NvDsObjectMeta` without a compiled C parser
-- `IPluginV2DynamicExt` CUDA kernel appended to the TRT network via TRT Python API; converts xyxy→xywh on GPU inside TRT, replacing the Python coordinate-transform loop; `metrics/profile_decode.py` isolates per-layer latency via `IProfiler`
-- 221 CPU-safe unit tests written before implementation (red→green); no GPU required for the test suite
-- Gaussian blur applied to every detected bbox region before `nvdsosd` renders or any output leaves the pipeline
-- FP32 vs FP16 vs FP16+decode-plugin compared on latency, VRAM, engine size, and fleet OTA cost; batch sweep 1–100 against a 25 fps real-time budget with fleet-sizing projections (`metrics/decode_comparison.ipynb`)
-- Per-frame CSV sink; mediamtx-served MOT17 sequences as the RTSP source (MOT17-04 has ground truth for MOTA/HOTA/IDF1 tracker evaluation)
-- Structured JSON-line logging (`pipelines/structured_log.py`) with per-stream `source_id` on every record; per-sensor health monitor (`metrics/health_monitor.py`) tracks liveness, rolling FPS vs expected, and time-since-last-detection, emitting a `health_tick` log line and `WARNING source_stalled` alerts via a GLib periodic callback
-- NGC DeepStream 9.0 + pyds compiled from source; `docker compose up` handles model export and conversion on first run
+## Problem and motivation
 
----
+A detector working on one video file does not prove that it can operate as an
+edge video system. A deployable pipeline must ingest live streams, batch work
+efficiently, preserve camera identity, track objects, protect sensitive
+pixels, expose failures, and stay inside a real-time latency and memory budget.
 
-## Pipeline architecture
+I built this project to answer three practical questions:
 
+1. Can a constrained 6 GB GPU sustain multiple live camera feeds through the
+   complete video graph?
+2. What performance, accuracy, and memory trade-offs appear when moving a
+   detector from FP32 to TensorRT FP16?
+3. What fails when custom detector output is integrated with DeepStream
+   metadata, tracking, OSD, and CPU-side probes—and how can those failures be
+   prevented from returning?
+
+## Results at a glance
+
+| Question | Measured answer | Reproducible evidence |
+|---|---|---|
+| Does the live system meet its frame budget? | **29.7 FPS per stream across three RTSP feeds for 30 minutes**, above the 25 FPS target | [Stability notebook](metrics/stability.ipynb) and [raw run](metrics/results/stability_live.json) |
+| What is the full-graph ceiling? | **129.4 FPS per stream** with file input and `sync=false`; **8.2% overhead** versus the 140.9 FPS/stream bare TensorRT ceiling | [Throughput run](metrics/results/throughput_unthrottled.json) |
+| Did FP16 sacrifice detections? | **1.52× faster than FP32**, with a **99.0% box match rate** and **0.9937 mean IoU** across 1,050 frames | [Accuracy results](metrics/results/accuracy.json) and [comparison notebook](metrics/decode_comparison.ipynb) |
+| Is the process stable under sustained load? | Peak VRAM was **1,632 MB** and RSS decreased by 260 MB during the 30-minute run; no leak was detected | [Stability notebook](metrics/stability.ipynb) |
+| Which tracker wins? | NvDCF produced the best IDF1 (**0.257**); ByteTrack-inspired NvSORT produced the fewest ID switches (**37**) and fragments (**188**) | [Tracker comparison](metrics/tracker_comparison.ipynb) |
+| How is behaviour protected? | **221 CPU-safe unit tests**, three GPU smoke tests, CI, and an accuracy-based model-promotion gate | [Tests](tests), [CI workflow](.github/workflows/unit-tests.yml), and [promotion gate](metrics/model_gate.py) |
+
+![Measured FP32 and FP16 latency and throughput](metrics/results/latency_comparison.png)
+
+## How it works in plain English
+
+Each camera is decoded on the GPU. `nvstreammux` combines one frame from each
+source into a batch, and `nvinfer` runs YOLO26n FP16 once for that batch. A
+custom TensorRT layer converts the detector coordinates on the GPU; a pad probe
+then adapts the output into DeepStream object metadata. `nvtracker` assigns
+persistent identities before `nvstreamdemux` separates the batch back into
+camera-specific branches. Each branch anonymises detected regions, writes its
+own CSV metadata, draws overlays, and publishes a processed RTSP stream.
+Periodic probes also report per-camera liveness, FPS, and detection health.
+
+```mermaid
+flowchart TD
+    A["Three RTSP camera feeds"] --> B["GPU decode and nvstreammux (batch 3)"]
+    B --> C["YOLO26n FP16 and CUDA decode"]
+    C --> D["Tensor metadata to DeepStream objects"]
+    D --> E["NvMultiObjectTracker"]
+    E --> F["nvstreamdemux"]
+    F --> G["Three source-specific branches"]
+    G --> H["Anonymisation and CSV metadata"]
+    H --> I["OSD and RTSP re-stream"]
+    G --> J["FPS and health monitoring"]
 ```
-mediamtx (RTSP server)
-  ├─ stream0 (MOT17-04)  ──┐
-  ├─ stream1 (MOT17-13)  ──┤
-  └─ stream2 (MOT17-02)  ──┘
 
-Per-source source bins (× 3):
-  rtspsrc → rtph264depay → nvv4l2decoder → queue ──→ nvstreammux.sink_{i}
+The per-source OSD placement is deliberate: placing one `nvdsosd` on the
+batched buffer rendered overlays only for source 0. The batch is therefore
+demultiplexed before each branch receives its own converter, probe, OSD, and
+output sink.
 
-Shared inference chain (batched, N=3):
-  nvstreammux → nvinfer (YOLO26n FP16 + yolo26_decode plugin, network-type=100, output-tensor-meta=1)
-             ← [nvinfer SRC probe: reads xywh tensor → NvDsObjectMeta (80 COCO classes)]
-             → nvtracker (NvMultiObjectTracker)
-             → nvstreamdemux
+## What broke and how it was fixed
 
-Per-source output branches (× 3):
-  demux.src_{i} → queue → nvvideoconvert (RGBA, unified mem)
-               → nvdsosd ← [Python probe: blur + CSV write]
-               → nvrtspoutsinkbin (ports 8556/8557/8558)
-```
+| Failure observed | Root cause | Fix and proof |
+|---|---|---|
+| The custom detector produced boxes, but `nvtracker` silently emitted no tracked objects | Tensor-output mode did not mark the frame as inferred, and the tracker reads `detector_bbox_info`, not only `rect_params` | Set `bInferDone`, populate both bbox structures, and initialise `object_id` as untracked; protected by three [regression tests](tests/unit/test_multi_stream.py) |
+| Overlays appeared on stream 0 but not the other streams | One OSD element was attached to the batched surface rather than each demultiplexed source | Moved conversion, the metadata/anonymisation probe, and OSD into each post-demux branch |
+| Accessing a frame from the Python anonymisation probe caused a segmentation fault | Default NVMM surfaces were device-only and not safely accessible through `pyds.get_nvds_buf_surface` | Configured `nvvideoconvert` with CUDA unified memory (`nvbuf-memory-type=3`) and isolated frame access behind tested helpers |
+| A cached batch-1 engine behaved incorrectly when the pipeline moved to three streams | Changing `nvinfer.batch-size` does not rebuild an incompatible TensorRT engine | Added dynamic-batch engines and `_make_nvinfer_config`, with tests that rewrite both batch size and legacy engine paths |
 
-A single `nvdsosd` on the batched buffer only draws on source 0 — the per-branch placement is required and mirrors NVIDIA's `deepstream-demux-multi-in-multi-out` reference topology.
+The complete symptom → diagnosis → root cause → fix → verification write-ups
+are in [Engineering Debugging Case Studies](docs/engineering-debugging.md).
 
 ---
 
@@ -147,10 +185,10 @@ Multi-stream batch sweep (FP16, single `nvstreammux` batch):
 | Scenario | FPS / stream | Notes |
 |---|---|---|
 | `trtexec` batch=3 (bare TRT kernel) | **140.9** | Pure inference, no graph overhead |
-| Unthrottled 3× file source | **131.3** | Full graph, `sync=false`; 7% overhead vs bare kernel |
-| Live 3-stream RTSP (30 min, `-re` cap) | **29.7** | Exceeds 25 fps floor; 4.4× headroom vs ceiling |
+| Unthrottled 3× file source | **129.4** | Full graph, `sync=false`; 8.2% overhead vs bare kernel |
+| Live 3-stream RTSP (30 min, `-re` cap) | **29.7** | Sustained above the 25 FPS target |
 
-Full-graph overhead vs the bare TRT kernel is **7 %** (131 vs 140.9 fps/stream) — the IOU tracker, OSD, and Python probe are cheap at this batch size; the main cost is GStreamer scheduling. The live pipeline sustains > 25 fps × 3 streams over 30 minutes with a peak VRAM of **1,632 MB** (IOU tracker) and an RSS that *decreased* by 260 MB over the run (DeepStream releasing initialisation caches) — definitively no memory leak. Full analysis and stability charts in `metrics/stability.ipynb`.
+Full-graph overhead vs the bare TRT kernel is **8.2%** (129.4 vs 140.9 FPS/stream). The live pipeline sustains more than 25 FPS across all three streams over 30 minutes, with a peak VRAM of **1,632 MB** and an RSS decrease of 260 MB; the monitor detected no memory leak. Full analysis and stability charts are in `metrics/stability.ipynb`.
 
 **Tracker comparison (M3.2)** — three `nvtracker` algorithms evaluated on MOT17-04 ground truth (47,557 GT boxes) via `py-motmetrics`. All three see the identical YOLO26n detection stream so differences isolate the tracker, not the detector. Full analysis in `metrics/tracker_comparison.ipynb`.
 
@@ -179,7 +217,7 @@ YOLO26n FP16 runs end-to-end through DeepStream with a C++ TRT decode plugin. Th
 
 - ✓ **M3.1** — Three tracker configs (IOU / NvDCF / ByteTrack); `--tracker` CLI flag; `probationAge` tuning; tracker CSVs in `metrics/tracker_results/`
 - ✓ **M3.2** — MOTA/MOTP/IDF1 evaluation via `py-motmetrics` on MOT17-04 GT; `metrics/evaluate_tracker.py`; `metrics/tracker_comparison.ipynb` with summary table + bar charts; fixed `bInferDone` / `detector_bbox_info` probe bugs; file-input source branch for GT-aligned eval
-- ✓ **M3.3** — Live end-to-end FPS (131 fps unthrottled / 29.7 fps live) + 30-min stability run; `metrics/perf_monitor.py` (21 CPU-safe tests); `--perf-json / --duration / --no-sync` flags; `metrics/stability.ipynb`
+- ✓ **M3.3** — Live end-to-end FPS (129.4 FPS unthrottled / 29.7 FPS live) + 30-min stability run; `metrics/perf_monitor.py` (21 CPU-safe tests); `--perf-json / --duration / --no-sync` flags; `metrics/stability.ipynb`
 - ✓ **M3.4** — GPU smoke tests (`tests/smoke/`); motmetrics integration test; GitHub Actions unit-test workflow; model-promotion gate (`metrics/model_gate.py`, 19 CPU-safe tests) with SHA-256 signed manifest and CI exit 0/1
 - ✓ **M3.5** — `docs/jetson-upgrade.md`, `docs/isp-and-camera-input.md`, `docs/system-design.md`; README completeness pass
 - *(in progress)* **M3.6** — Observability / reactive debugging:
@@ -214,7 +252,7 @@ YOLO26n FP16 runs end-to-end through DeepStream with a C++ TRT decode plugin. Th
 |-----|--------|------------|
 | Jetson / nvargus | No Jetson hardware available | `docs/jetson-upgrade.md` — component diff table: x86 dGPU → JetPack; nvargus CSI path; INT8 on Jetson; TDP modes |
 | INT8 quantisation | GTX 1660Ti has no Tensor Cores; INT8 has no hardware speedup | Documented in `models/convert.py`; would enable on Jetson AGX Orin or RTX-class GPU |
-| GPU smoke tests | Require GPU runner; written last to avoid slow CI | Planned M3.4 via `pytest --gpu` and `tests/smoke/` |
+| GPU smoke tests in CI | The tests require a physical NVIDIA GPU and DeepStream, while the default GitHub-hosted runner is CPU-only | Run `pytest tests/ --gpu` on the target machine or add a self-hosted GPU runner |
 | Decode plugin shows little gain on YOLO26n | YOLO26n is NMS-free (300 pre-decoded boxes), so the kernel does ~0.006 ms of work; the accuracy comparison is between two separately-compiled TRT graphs, not a controlled kernel isolation | M2.6: YOLOv8n plugin (8,400 candidates + DFL + NMS) demonstrates where the pattern pays off |
 | DeepSORT tracker | Re-ID model exceeds 6 GB VRAM ceiling | Documented in M3 tracker comparison rationale; ByteTrack recommended instead |
 
