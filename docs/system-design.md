@@ -49,8 +49,8 @@ This document is preparation for the VivaCity system design interview.
 
 Performance (GTX 1660 Ti, measured):
   - Live RTSP: 29.7 FPS/stream (exceeds 25 fps real-time floor)
-  - Unthrottled: 131.3 FPS/stream (4.4× headroom vs live floor)
-  - VRAM: 1,632 MB peak (3-stream, NvDCF tracker)
+  - Unthrottled: 129.4 FPS/stream (5.2× the 25 FPS floor)
+  - VRAM: 1,632 MB peak during the 3-stream live run
   - RSS: stable — decreased 260 MB over 30 min (no leak)
 ```
 
@@ -64,7 +64,8 @@ At batch=15 on this hardware:
 - 5,000 cameras ÷ 15 streams/node = **334 edge nodes**
 - Upgrade from batch=3 → 15 reduces node count 5×: lower hosting cost, fewer failure domains to manage
 
-On Jetson AGX Orin with INT8: batch ceiling rises to 30–50 streams/node (2–3× fewer nodes).
+Jetson AGX Orin and INT8 are documented upgrade paths, but this repository
+does not claim a stream ceiling for them without target-hardware measurements.
 
 ---
 
@@ -94,7 +95,9 @@ Transformed to JSON (edge agent):
 - 15 streams/node × 25 KB/s = 375 KB/s per node
 - 334 nodes × 375 KB/s = **125 MB/s aggregate** (well within typical cloud ingress capacity)
 
-Compare to pixel streaming: 1920×1080 H.264 at 4 Mbps × 5,000 streams = 2.5 TB/s. Metadata-only is a **20,000× bandwidth reduction**.
+Compare to pixel streaming: 1920×1080 H.264 at 4 Mbps × 5,000 streams =
+20 Gbps, or approximately 2.5 GB/s. Against the 125 MB/s metadata estimate,
+metadata-only transport is an approximate **20× bandwidth reduction**.
 
 **Privacy**: pixel data never leaves the edge node. The per-frame CSV and JSON contain only coordinates, class labels, object IDs, and confidence — no face or number plate imagery. This is the architectural enforcement of Privacy by Design.
 
