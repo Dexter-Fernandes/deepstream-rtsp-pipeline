@@ -188,10 +188,15 @@ def test_build_pipeline_has_no_sync():
 # ---------------------------------------------------------------------------
 
 
-def test_run_uses_configure_pipeline_logging():
-    import inspect
-    from pipelines.multi_stream import run
-    assert "configure_pipeline_logging" in inspect.getsource(run)
+def test_module_configures_pipeline_logging():
+    import logging
+    import pipelines.multi_stream  # noqa: F401
+
+    pipeline_logger = logging.getLogger("pipeline")
+    assert any(
+        type(handler.formatter).__name__ == "_JsonFormatter"
+        for handler in pipeline_logger.handlers
+    )
 
 
 def test_run_emits_pipeline_start_event():
