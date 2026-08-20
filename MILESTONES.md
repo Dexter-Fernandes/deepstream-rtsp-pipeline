@@ -234,11 +234,11 @@
 
 ### M3.8.1 — WildTrack Identity + Ground-Plane Utilities
 
-- [ ] Extend `metrics/wildtrack_gt.py` with opt-in identity parsing so the existing annotation dictionary contract remains backward-compatible
-- [ ] Add `decode_position_id()`, `frame_index_from_stem()`, `load_wildtrack_mtmc_gt()`, and `to_mot_rows()`; bind camera names to source IDs explicitly
-- [ ] Add `pipelines/ground_plane.py`: foot-point extraction, homography projection, analytic projection Jacobian, uncertainty propagation, and truncation-aware foot reliability
-- [ ] Scale foot-point pixel uncertainty with box height; for top-truncated boxes, fall back to width-derived height; reject bottom- and horizontally-truncated boxes
-- [ ] Cover all helpers with CPU-only unit tests, including the top-truncation fallback and unreliable-foot rejection rules
+- [x] Extend `metrics/wildtrack_gt.py` with opt-in identity parsing so the existing annotation dictionary contract remains backward-compatible
+- [x] Add `decode_position_id()`, `frame_index_from_stem()`, `load_wildtrack_mtmc_gt()`, and `to_mot_rows()`; bind camera names to source IDs explicitly
+- [x] Add `pipelines/ground_plane.py`: foot-point extraction, homography projection, analytic projection Jacobian, uncertainty propagation, and truncation-aware foot reliability
+- [x] Scale foot-point pixel uncertainty with box height; for top-truncated boxes, fall back to width-derived height; reject bottom- and horizontally-truncated boxes
+- [x] Cover all helpers with CPU-only unit tests, including the top-truncation fallback and unreliable-foot rejection rules
 
 ### M3.8.2 — Homography Fit + Quality Gate
 
