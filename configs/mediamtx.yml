@@ -2,7 +2,6 @@
 
 paths:
   stream0:
-    # MOT17-04: benchmark sequence (static camera, high density, 1050 frames, has GT)
     runOnInit: >
       ffmpeg -re -stream_loop -1
       -i data/c1_5min.mp4
@@ -10,7 +9,6 @@ paths:
     runOnInitRestart: yes
 
   stream1:
-    # MOT17-13: visual demo sequence (busy crossing)
     runOnInit: >
       ffmpeg -re -stream_loop -1
       -i data/c2_5min.mp4
@@ -18,7 +16,6 @@ paths:
     runOnInitRestart: yes
 
   stream2:
-    # MOT17-02: multi-stream third feed (high density, different scene)
     runOnInit: >
       ffmpeg -re -stream_loop -1
       -i data/c3_5min.mp4
