@@ -32,6 +32,7 @@ class _Node:
 @dataclass
 class _FrameMeta:
     frame_num: int = 0
+    source_id: int = -1
     obj_meta_list: object = None  # _Node or None
 
 
@@ -40,8 +41,9 @@ class _BatchMeta:
     frame_meta_list: object = None  # _Node or None
 
 
-# Cast helpers that pass the fake objects straight through
-_id = lambda x: x  # noqa: E731
+# Cast helper that passes the fake objects straight through.
+def _id(value):
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +69,33 @@ def test_single_detection_object_id():
     batch = _BatchMeta(frame_meta_list=_Node(data=frame))
     result = parse_frame_meta(batch, _cast_frame=_id, _cast_obj=_id)
     assert result[0].object_id == 7
+
+
+def test_detection_identity_fields_are_backward_compatible_defaults():
+    detection = Detection(
+        frame_num=0,
+        object_id=7,
+        class_id=0,
+        class_label="person",
+        confidence=0.9,
+        left=1.0,
+        top=2.0,
+        width=3.0,
+        height=4.0,
+    )
+
+    assert detection.source_id == -1
+    assert detection.global_id == -1
+
+
+def test_frame_source_id_is_preserved_on_each_detection():
+    obj_node = _Node(data=_ObjMeta(object_id=7))
+    frame = _FrameMeta(frame_num=3, source_id=2, obj_meta_list=obj_node)
+    batch = _BatchMeta(frame_meta_list=_Node(data=frame))
+
+    result = parse_frame_meta(batch, _cast_frame=_id, _cast_obj=_id)
+
+    assert result[0].source_id == 2
 
 
 def test_single_detection_class_and_label():

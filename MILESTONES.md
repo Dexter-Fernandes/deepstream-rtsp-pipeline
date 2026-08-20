@@ -274,9 +274,9 @@
 
 ### M3.8.5 — Detection + CSV Identity Contract
 
-- [ ] Append defaulted `source_id: int = -1` and `global_id: int = -1` fields to `Detection`
-- [ ] Append matching CSV columns without changing existing column names or ordering; readers must accept legacy CSVs via `row.get("global_id", -1)`
-- [ ] Keep tracker `object_id` intact for the single-camera baseline; never overwrite DeepStream object IDs with global IDs
+- [x] Append defaulted `source_id: int = -1` and `global_id: int = -1` fields to `Detection`
+- [x] Append matching CSV columns without changing existing column names or ordering; readers must accept legacy CSVs via `row.get("global_id", -1)`
+- [x] Keep tracker `object_id` intact for the single-camera baseline; never overwrite DeepStream object IDs with global IDs
 
 ### M3.8.6 — Online Pipeline + RTSP Correctness
 

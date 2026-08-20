@@ -12,6 +12,8 @@ class Detection:
     top: float
     width: float
     height: float
+    source_id: int = -1
+    global_id: int = -1
 
 
 def parse_frame_meta(
@@ -44,6 +46,7 @@ def parse_frame_meta(
                 top=obj.rect_params.top,
                 width=obj.rect_params.width,
                 height=obj.rect_params.height,
+                source_id=int(getattr(frame_meta, "source_id", -1)),
             ))
             l_obj = l_obj.next
         l_frame = l_frame.next
