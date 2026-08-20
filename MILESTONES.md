@@ -201,7 +201,7 @@
 > Maps to the JD's "Reactive Debugging and Support" (15% of the role) and "make systems more robust." Nothing else in M1–M3 addresses how you *notice* and *diagnose* a degraded sensor.
 - [x] Structured logging across the pipeline (per-stream source_id, frame counts, FPS, dropped frames, reconnect events) — machine-parseable JSON-line records via `pipelines/structured_log.py`; all `print()` replaced with levelled `log_event()` calls (DEBUG/INFO/WARNING/ERROR); 8 CPU-safe unit tests
 - [x] Per-sensor health metrics: liveness, current FPS vs expected, time-since-last-detection, VRAM/RSS; `metrics/health_monitor.py` — `HealthMonitor` with `record_frame()` probe wiring + `_health_tick()` GLib callback emitting periodic `health_tick` JSON log line and `WARNING source_stalled` for dead streams; 12 CPU-safe unit tests
-- [ ] Failure-mode playbook in `docs/`: how to diagnose a stuck stream, a silently-degraded detector (FPS fine but detections wrong), an OOM, and a sensor that reconnects but produces no metadata
+- [x] Failure-mode playbook in `docs/`: how to diagnose a stuck stream, a silently-degraded detector (FPS fine but detections wrong), an OOM, and a sensor that reconnects but produces no metadata — `docs/failure-mode-playbook.md`, grounded in the actual `event` names/fields from `structured_log.py` and `health_monitor.py` (including the real M3.2 `nvtracker` association bug as a worked example of mode 2)
 - [ ] Demonstrate one debugging walkthrough end-to-end (inject a fault, show how the logs/metrics surface it)
 
 ### M3.7 — Timeline & Kernel Profiling (Nsight Systems)
