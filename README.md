@@ -10,7 +10,7 @@ NVIDIA DeepStream pipeline running three concurrent RTSP streams through GPU-acc
 - 221 CPU-safe unit tests written before implementation (red→green); no GPU required for the test suite
 - Gaussian blur applied to every detected bbox region before `nvdsosd` renders or any output leaves the pipeline
 - FP32 vs FP16 vs FP16+decode-plugin compared on latency, VRAM, engine size, and fleet OTA cost; batch sweep 1–100 against a 25 fps real-time budget with fleet-sizing projections (`metrics/decode_comparison.ipynb`)
-- Per-frame CSV sink; mediamtx-served MOT17 sequences as the RTSP source (MOT17-04 has ground truth for MOTA/HOTA/IDF1 tracker evaluation)
+- Per-frame CSV sink; mediamtx-served Wildtrack Cam1–3 (5-min 1080p60 clips, TCP RTSP) as the live source; MOT17-04 played via a file-source branch for GT-aligned MOTA/IDF1 tracker evaluation
 - Structured JSON-line logging (`pipelines/structured_log.py`) with per-stream `source_id` on every record; per-sensor health monitor (`metrics/health_monitor.py`) tracks liveness, rolling FPS vs expected, and time-since-last-detection, emitting a `health_tick` log line and `WARNING source_stalled` alerts via a GLib periodic callback
 - NGC DeepStream 9.0 + pyds compiled from source; `docker compose up` handles model export and conversion on first run
 
@@ -20,9 +20,9 @@ NVIDIA DeepStream pipeline running three concurrent RTSP streams through GPU-acc
 
 ```
 mediamtx (RTSP server)
-  ├─ stream0 (MOT17-04)  ──┐
-  ├─ stream1 (MOT17-13)  ──┤
-  └─ stream2 (MOT17-02)  ──┘
+  ├─ stream0 (Wildtrack cam1)  ──┐
+  ├─ stream1 (Wildtrack cam2)  ──┤
+  └─ stream2 (Wildtrack cam3)  ──┘
 
 Per-source source bins (× 3):
   rtspsrc → rtph264depay → nvv4l2decoder → queue ──→ nvstreammux.sink_{i}
@@ -45,7 +45,7 @@ A single `nvdsosd` on the batched buffer only draws on source 0 — the per-bran
 
 ## Quick-start
 
-**Prerequisites:** NVIDIA driver ≥ 590.48, `nvidia-container-toolkit`, `mediamtx` on host, MOT17-04/13/02 clips as MP4 in `data/`.
+**Prerequisites:** NVIDIA driver ≥ 590.48, `nvidia-container-toolkit`, `mediamtx` on host, Wildtrack cam1/cam2/cam3 5-min clips as MP4 in `data/` (live streaming); MOT17-04 as MP4 in `data/` for GT-aligned tracker evaluation (`metrics/evaluate_tracker.py`).
 
 ```bash
 # Start RTSP source streams
@@ -204,7 +204,7 @@ YOLO26n FP16 runs end-to-end through DeepStream with a C++ TRT decode plugin. Th
 
 **`nvbuf-memory-type=3` on `nvvideoconvert`.** Default NVMM is device-only; `pyds.get_nvds_buf_surface` from a Python probe segfaults. CUDA unified memory (`type=3`) keeps the `NvBufSurface` CPU-accessible without an explicit `cudaMemcpy`.
 
-**mediamtx over real IP cameras.** Provides a reproducible, loopable, committable source. MOT17-04 has free ground truth annotations enabling quantitative tracker evaluation in M3.
+**mediamtx over real IP cameras.** Provides a reproducible, loopable, committable source. Wildtrack Cam1–3 give realistic sustained multi-stream RTSP load for the live pipeline; Wildtrack does have per-frame pedestrian GT (JSON, sampled every 5th frame), but `metrics/evaluate_tracker.py` currently only parses MOT17's dense per-frame CSV layout, so MOT17-04 is used separately (via a file-source branch, bypassing RTSP) for quantitative tracker evaluation in M3.2.
 
 ---
 
