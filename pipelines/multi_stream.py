@@ -24,6 +24,10 @@ from pipelines.structured_log import configure_pipeline_logging, get_pipeline_lo
 configure_pipeline_logging()
 _log = get_pipeline_logger("multi_stream")
 
+# Seconds to wait for EOS to reach the file sinks before giving up on a clean
+# MP4 finalisation (--record-dir only).
+_EOS_GRACE_S = 20
+
 _PLUGIN_LIB = Path("/opt/ds_plugins/libyolo26_decode.so")
 if _PLUGIN_LIB.exists():
     ctypes.CDLL(str(_PLUGIN_LIB), ctypes.RTLD_GLOBAL)
@@ -57,6 +61,9 @@ class MultiStreamConfig:
     mtmc_reassign_interval: int = 10
     mtmc_json: str | None = None
     mtmc_osd_labels: bool = False
+    osd_labels: bool = False
+    osd_font_size: int = 13
+    record_dir: str | None = None
     mtmc_sync_bucket_ms: float = 33.0
     mtmc_max_skew_ms: float = 100.0
     mtmc_appearance: bool = False
@@ -308,7 +315,29 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
         help="DeepStream secondary ReID inference config",
     )
     parser.add_argument("--mtmc-w-app", type=float, default=0.5, dest="mtmc_w_app")
+    parser.add_argument(
+        "--osd-labels",
+        action="store_true",
+        dest="osd_labels",
+        help="Draw 'ID <track>' (plus '| G<global>' under --mtmc) above each box",
+    )
+    parser.add_argument(
+        "--osd-font-size",
+        type=int,
+        default=13,
+        dest="osd_font_size",
+        help="OSD label size in px at source resolution (raise it for downscaled demos)",
+    )
+    parser.add_argument(
+        "--record-dir",
+        default=None,
+        dest="record_dir",
+        metavar="DIR",
+        help="Encode each source's OSD output to DIR/cam<N>.mp4 instead of restreaming",
+    )
     args = parser.parse_args(argv)
+    if args.record_dir is not None and args.restream_base_port is not None:
+        parser.error("--record-dir and --restream-base-port both claim the branch sink")
     return MultiStreamConfig(
         uris=args.uris,
         nvinfer_config=args.nvinfer_config,
@@ -334,6 +363,9 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
         mtmc_appearance=args.mtmc_appearance,
         reid_config=args.reid_config,
         mtmc_w_app=args.mtmc_w_app,
+        osd_labels=args.osd_labels,
+        osd_font_size=args.osd_font_size,
+        record_dir=args.record_dir,
     )
 
 
@@ -343,6 +375,11 @@ def _output_csv_path(output_dir: str, source_id: int) -> str:
 
 def _restream_port(base_port: int, source_id: int) -> int:
     return base_port + source_id
+
+
+def _record_video_path(record_dir: str, source_id: int) -> str:
+    """One MP4 per camera, numbered the way the demo tooling expects."""
+    return str(Path(record_dir) / f"cam{source_id + 1}.mp4")
 
 
 def _make_nvinfer_config(base_config: str, n: int) -> str:
@@ -411,6 +448,50 @@ def mux_timing_properties(uris: list[str]) -> dict[str, object]:
 def format_mtmc_osd_label(class_label: str, *, object_id: int, global_id: int) -> str:
     """Format an OSD label without obscuring the source-local tracker identity."""
     return f"{class_label} local={object_id} global={global_id}"
+
+
+def format_track_label(*, object_id: int, global_id: int | None = None) -> str:
+    """Compact overlay label: the tracker ID, plus the global ID when fused.
+
+    ASCII only — nvdsosd renders through freetype with a fixed font, and a short
+    label stays legible once three 1080p tiles are scaled to README width.
+    """
+    if global_id is None:
+        return f"ID {object_id}"
+    return f"ID {object_id} | G{global_id}"
+
+
+def osd_border_width(font_size: int) -> int:
+    """Keep the box border in proportion to the label, never below the default."""
+    return max(3, font_size // 8)
+
+
+def configure_osd_text_params(text_params, *, rect_params, text: str, font_size: int = 13) -> None:
+    """Populate every field nvdsosd needs before it will draw `text`.
+
+    Object meta acquired from the pool arrives zeroed, so setting `display_text`
+    alone renders nothing: an empty font name and a zero font size both silence
+    the draw. Offsets are clamped so a box at the frame edge keeps its label
+    on-screen.
+    """
+    text_params.display_text = text
+    text_params.x_offset = max(int(rect_params.left), 0)
+    text_params.y_offset = max(int(rect_params.top) - 24, 0)
+
+    font_params = text_params.font_params
+    font_params.font_name = "Serif"
+    font_params.font_size = font_size
+    font_params.font_color.red = 1.0
+    font_params.font_color.green = 1.0
+    font_params.font_color.blue = 1.0
+    font_params.font_color.alpha = 1.0
+
+    # Solid-ish backing plate: white-on-video is unreadable over pale ground.
+    text_params.set_bg_clr = 1
+    text_params.text_bg_clr.red = 0.0
+    text_params.text_bg_clr.green = 0.0
+    text_params.text_bg_clr.blue = 0.0
+    text_params.text_bg_clr.alpha = 0.6
 
 
 def attach_mtmc_probe(
@@ -673,7 +754,39 @@ def build_pipeline(
         # nvbuf-mem-cuda-unified: required for pyds.get_nvds_buf_surface on dGPU
         converter.set_property("nvbuf-memory-type", 3)
 
-        if config.restream_base_port is not None:
+        if config.record_dir is not None:
+            # Record the branch instead of restreaming it. Every processed frame
+            # is muxed with its source PTS, so the three files stay frame-aligned
+            # with each other however fast the pipeline actually ran — no RTSP
+            # client, no attach skew, and nothing dropped by a stalled reader.
+            Path(config.record_dir).mkdir(parents=True, exist_ok=True)
+            enc_convert = Gst.ElementFactory.make("nvvideoconvert", f"enc_convert_{i}")
+            caps_nv12 = Gst.ElementFactory.make("capsfilter", f"caps_nv12_{i}")
+            encoder = Gst.ElementFactory.make("nvv4l2h264enc", f"encoder_{i}")
+            # "rec_" prefix: the file-source branch already owns h264parse_{i}.
+            parser_el = Gst.ElementFactory.make("h264parse", f"rec_h264parse_{i}")
+            muxer = Gst.ElementFactory.make("mp4mux", f"mp4mux_{i}")
+            sink = Gst.ElementFactory.make("filesink", f"sink_{i}")
+
+            for name, el in [
+                (f"enc_convert_{i}", enc_convert), (f"caps_nv12_{i}", caps_nv12),
+                (f"encoder_{i}", encoder), (f"rec_h264parse_{i}", parser_el),
+                (f"mp4mux_{i}", muxer), (f"sink_{i}", sink),
+            ]:
+                if not el:
+                    raise RuntimeError(f"Could not create GStreamer element: {name}")
+                pipeline.add(el)
+
+            caps_nv12.set_property(
+                "caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12")
+            )
+            encoder.set_property("bitrate", 8_000_000)
+            sink.set_property("location", _record_video_path(config.record_dir, i))
+            # The recording is faster or slower than real time depending on load;
+            # syncing the sink to the clock would only stall the graph.
+            sink.set_property("sync", False)
+            sink.set_property("async", False)
+        elif config.restream_base_port is not None:
             sink = Gst.ElementFactory.make("nvrtspoutsinkbin", f"sink_{i}")
             if not sink:
                 raise RuntimeError(f"Could not create nvrtspoutsinkbin for source {i}")
@@ -693,7 +806,15 @@ def build_pipeline(
         queue_out.link(converter)
         converter.link(caps_rgba)
         caps_rgba.link(osd)
-        osd.link(sink)
+        if config.record_dir is not None:
+            osd.link(enc_convert)
+            enc_convert.link(caps_nv12)
+            caps_nv12.link(encoder)
+            encoder.link(parser_el)
+            parser_el.link(muxer)
+            muxer.link(sink)
+        else:
+            osd.link(sink)
 
     return pipeline
 
@@ -731,7 +852,7 @@ def _parse_frame_detections(frame_meta):
     return detections
 
 
-def _apply_mtmc_osd_labels(frame_meta, id_map) -> None:
+def _apply_mtmc_osd_labels(frame_meta, id_map, *, font_size: int = 13) -> None:
     """Read global IDs from the Python snapshot and update display text only."""
     import pyds
 
@@ -745,11 +866,43 @@ def _apply_mtmc_osd_labels(frame_meta, id_map) -> None:
         object_id = int(obj_meta.object_id)
         global_id = id_map.get((source_id, object_id))
         if global_id is not None:
-            obj_meta.text_params.display_text = format_mtmc_osd_label(
-                str(obj_meta.obj_label),
-                object_id=object_id,
-                global_id=global_id,
+            configure_osd_text_params(
+                obj_meta.text_params,
+                rect_params=obj_meta.rect_params,
+                text=format_mtmc_osd_label(
+                    str(obj_meta.obj_label),
+                    object_id=object_id,
+                    global_id=global_id,
+                ),
+                font_size=font_size,
             )
+        try:
+            obj_list = obj_list.next
+        except StopIteration:
+            break
+
+
+def _apply_osd_labels(frame_meta, id_map, *, font_size: int = 13) -> None:
+    """Draw the tracker ID on every object, appending the global ID when fused."""
+    import pyds
+
+    source_id = int(frame_meta.source_id)
+    obj_list = frame_meta.obj_meta_list
+    while obj_list is not None:
+        try:
+            obj_meta = pyds.NvDsObjectMeta.cast(obj_list.data)
+        except StopIteration:
+            break
+        object_id = int(obj_meta.object_id)
+        configure_osd_text_params(
+            obj_meta.text_params,
+            rect_params=obj_meta.rect_params,
+            text=format_track_label(
+                object_id=object_id,
+                global_id=id_map.get((source_id, object_id)),
+            ),
+            font_size=font_size,
+        )
         try:
             obj_list = obj_list.next
         except StopIteration:
@@ -828,6 +981,7 @@ def run(config: MultiStreamConfig) -> None:
     _scale_x = config.mux_width / _NET_W
     _scale_y = config.mux_height / _NET_H
     _N_DETS, _N_ATTRS = 300, 6
+    _border_width = osd_border_width(config.osd_font_size)
 
     def _yolo_decode_probe(pad, info, _user_data):
         gst_buffer = info.get_buffer()
@@ -890,7 +1044,7 @@ def run(config: MultiStreamConfig) -> None:
                         rect.top = top
                         rect.width = width
                         rect.height = height
-                        rect.border_width = 3
+                        rect.border_width = _border_width
                         rect.border_color.red = 0.0
                         rect.border_color.green = 1.0
                         rect.border_color.blue = 0.0
@@ -1102,8 +1256,10 @@ def run(config: MultiStreamConfig) -> None:
                     else mtmc_runtime is None
                 ),
             )
-            if mtmc_runtime is not None and config.mtmc_osd_labels:
-                _apply_mtmc_osd_labels(frame_meta, id_map)
+            if config.osd_labels:
+                _apply_osd_labels(frame_meta, id_map, font_size=config.osd_font_size)
+            elif mtmc_runtime is not None and config.mtmc_osd_labels:
+                _apply_mtmc_osd_labels(frame_meta, id_map, font_size=config.osd_font_size)
             health_monitor.record_frame(source_id, t=time.monotonic(), has_detection=bool(detections))
 
             # Optional: blur bboxes in-place on the NVMM surface before OSD draws
@@ -1171,11 +1327,27 @@ def run(config: MultiStreamConfig) -> None:
 
     GLib.timeout_add_seconds(_health_interval_s, _health_tick)
 
+    def _stop(reason: str, **fields) -> None:
+        log_event(_log, logging.INFO, event="pipeline_stop", reason=reason, **fields)
+        if config.record_dir is None:
+            loop.quit()
+            return
+
+        # mp4mux only writes its moov atom on EOS: tearing the pipeline down
+        # first leaves three unplayable files. Quit on the bus EOS, with a
+        # bounded fallback so a wedged element cannot hang the process.
+        def _eos_deadline():
+            log_event(_log, logging.WARNING, event="pipeline_stop",
+                      reason="eos_timeout", detail="recording may be truncated")
+            loop.quit()
+            return False
+
+        pipeline.send_event(Gst.Event.new_eos())
+        GLib.timeout_add_seconds(_EOS_GRACE_S, _eos_deadline)
+
     if config.duration:
         def _on_duration_timeout():
-            log_event(_log, logging.INFO, event="pipeline_stop",
-                      reason="duration_elapsed", duration_s=config.duration)
-            loop.quit()
+            _stop("duration_elapsed", duration_s=config.duration)
             return False
 
         GLib.timeout_add_seconds(config.duration, _on_duration_timeout)
@@ -1196,8 +1368,7 @@ def run(config: MultiStreamConfig) -> None:
     bus.connect("message", _on_message)
 
     def _on_sigint(_sig, _frame):
-        log_event(_log, logging.INFO, event="pipeline_stop", reason="sigint")
-        loop.quit()
+        _stop("sigint")
 
     signal.signal(signal.SIGINT, _on_sigint)
     signal.signal(signal.SIGTERM, _on_sigint)

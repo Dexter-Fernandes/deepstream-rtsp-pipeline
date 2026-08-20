@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 from pipelines.mtmc_runtime import MtmcBatchReceipt, MtmcIdentitySnapshot
 from pipelines.multi_stream import (
@@ -17,6 +17,23 @@ from pipelines.multi_stream import (
     prepare_mtmc,
     rtsp_clock_properties,
 )
+
+
+def _colour():
+    """Stand-in for pyds NvOSD_ColorParams — zeroed, like a pool-acquired meta."""
+    return SimpleNamespace(red=0.0, green=0.0, blue=0.0, alpha=0.0)
+
+
+def _TextParams():
+    """Stand-in for pyds NvOSD_TextParams, matching its attribute layout."""
+    return SimpleNamespace(
+        display_text="",
+        x_offset=0,
+        y_offset=0,
+        set_bg_clr=0,
+        text_bg_clr=_colour(),
+        font_params=SimpleNamespace(font_name="", font_size=0, font_color=_colour()),
+    )
 
 
 def test_default_uris_is_empty_list():
@@ -391,6 +408,129 @@ def test_mtmc_osd_label_keeps_local_and_global_identity_visible():
     assert format_mtmc_osd_label("person", object_id=17, global_id=41) == (
         "person local=17 global=41"
     )
+
+
+def test_record_dir_defaults_off_and_names_one_mp4_per_camera():
+    from pipelines.multi_stream import _record_video_path
+
+    assert MultiStreamConfig().record_dir is None
+    assert parse_args([]).record_dir is None
+    assert parse_args(["--record-dir", "/tmp/demo"]).record_dir == "/tmp/demo"
+    assert _record_video_path("/tmp/demo", 0) == "/tmp/demo/cam1.mp4"
+    assert _record_video_path("/tmp/demo", 2) == "/tmp/demo/cam3.mp4"
+
+
+def test_record_dir_and_restream_cannot_share_the_branch_sink():
+    import pytest
+
+    with pytest.raises(SystemExit):
+        parse_args(["--record-dir", "/tmp/demo", "--restream-base-port", "8556"])
+
+
+def test_build_pipeline_encodes_to_mp4_when_recording():
+    import inspect
+
+    from pipelines.multi_stream import build_pipeline
+
+    source = inspect.getsource(build_pipeline)
+    assert "config.record_dir" in source
+    assert "nvv4l2h264enc" in source
+    assert "mp4mux" in source
+    assert "filesink" in source
+
+
+def test_recording_run_sends_eos_so_mp4mux_writes_its_moov_atom():
+    import inspect
+
+    from pipelines.multi_stream import run
+
+    source = inspect.getsource(run)
+    assert "new_eos" in source
+
+
+def test_track_label_shows_global_identity_only_when_it_is_known():
+    from pipelines.multi_stream import format_track_label
+
+    assert format_track_label(object_id=42) == "ID 42"
+    assert format_track_label(object_id=42, global_id=7) == "ID 42 | G7"
+
+
+def test_osd_text_params_are_fully_populated_so_nvdsosd_actually_draws():
+    from pipelines.multi_stream import configure_osd_text_params
+
+    text_params = _TextParams()
+    rect_params = SimpleNamespace(left=120.4, top=300.9)
+
+    configure_osd_text_params(text_params, rect_params=rect_params, text="ID 42 | G7")
+
+    assert text_params.display_text == "ID 42 | G7"
+    # A pool-acquired object meta arrives zeroed: without a font name and a
+    # non-zero size nvdsosd silently draws nothing.
+    assert text_params.font_params.font_name
+    assert text_params.font_params.font_size > 0
+    assert text_params.font_params.font_color.alpha == 1.0
+    assert text_params.set_bg_clr == 1
+    assert text_params.text_bg_clr.alpha > 0
+    assert text_params.x_offset == 120
+    assert text_params.y_offset == 276
+
+
+def test_osd_font_size_scales_the_label_and_the_box_border_together():
+    from pipelines.multi_stream import configure_osd_text_params, osd_border_width
+
+    assert MultiStreamConfig().osd_font_size == 13
+    assert parse_args(["--osd-font-size", "48"]).osd_font_size == 48
+
+    # The default border stays 3 px, so existing runs render identically; a
+    # demo-sized font gets a proportionally heavier box to survive downscaling.
+    assert osd_border_width(13) == 3
+    assert osd_border_width(48) == 6
+
+    text_params = _TextParams()
+    configure_osd_text_params(
+        text_params,
+        rect_params=SimpleNamespace(left=0.0, top=100.0),
+        text="ID 1",
+        font_size=48,
+    )
+    assert text_params.font_params.font_size == 48
+
+
+def test_osd_text_never_leaves_the_frame_for_a_box_at_the_top_edge():
+    from pipelines.multi_stream import configure_osd_text_params
+
+    text_params = _TextParams()
+
+    configure_osd_text_params(
+        text_params, rect_params=SimpleNamespace(left=-3.0, top=4.0), text="ID 1"
+    )
+
+    assert text_params.x_offset == 0
+    assert text_params.y_offset == 0
+
+
+def test_parse_args_osd_labels_default_off_and_opt_in():
+    assert MultiStreamConfig().osd_labels is False
+    assert parse_args([]).osd_labels is False
+    assert parse_args(["--osd-labels"]).osd_labels is True
+
+
+def test_probe_applies_osd_labels_only_when_the_flag_is_set():
+    import inspect
+
+    from pipelines.multi_stream import run
+
+    source = inspect.getsource(run)
+    assert "config.osd_labels" in source
+    assert "_apply_osd_labels" in source
+
+
+def test_mtmc_osd_labels_configure_text_params_so_they_render():
+    import inspect
+
+    from pipelines.multi_stream import _apply_mtmc_osd_labels
+
+    assert "configure_osd_text_params" in inspect.getsource(_apply_mtmc_osd_labels)
 
 
 def test_mtmc_probe_attaches_to_tracker_source_before_demux():
