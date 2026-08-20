@@ -101,6 +101,8 @@ def fit_camera_homography(
     )
     if matrix is None:
         raise ValueError(f"OpenCV could not fit a homography for {camera}")
+    if not np.isfinite(matrix).all() or matrix[2, 2] == 0.0:
+        raise ValueError(f"OpenCV returned a degenerate homography for {camera}")
     matrix = matrix / matrix[2, 2]
 
     holdout_errors = _projection_errors(matrix, holdout_rows)

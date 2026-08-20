@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from metrics.fit_homography import (
@@ -179,6 +180,26 @@ def test_cli_does_not_publish_a_calibration_that_fails_the_quality_gate(tmp_path
         )
 
     assert not (output_dir / "homography_C1.json").exists()
+
+
+def test_fit_camera_homography_rejects_a_degenerate_matrix(monkeypatch):
+    def _degenerate_findHomography(*args, **kwargs):
+        matrix = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]])
+        mask = np.ones((len(args[0]), 1), dtype=np.uint8)
+        return matrix, mask
+
+    monkeypatch.setattr(
+        "metrics.fit_homography.cv2.findHomography", _degenerate_findHomography
+    )
+
+    with pytest.raises(ValueError, match="degenerate"):
+        fit_camera_homography(
+            _synthetic_rows(),
+            camera="C1",
+            source_id=0,
+            dataset_root=Path("/dataset/labelled_ds"),
+            seed=3,
+        )
 
 
 def test_c2_fit_provenance_documents_its_expected_lower_inlier_ratio():
