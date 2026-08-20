@@ -74,6 +74,18 @@ def test_observations_above_maximum_sigma_are_dropped():
     assert (1, 20) not in id_map
 
 
+def test_zero_sigma_observations_are_dropped_instead_of_raising():
+    # Previously raised ZeroDivisionError in _candidate_cost (sqrt(0**2+0**2)).
+    observations = [
+        GroundObservation(0, 0, 10, 0.0, 0.0, 0.0),
+        GroundObservation(0, 1, 20, 0.0, 0.0, 0.0),
+    ]
+
+    id_map = fuse_offline(observations, MtmcConfig())
+
+    assert id_map == {}
+
+
 def test_rejected_observation_does_not_leak_an_embedding_cache_entry():
     fuser = MtmcFuser(MtmcConfig(max_sigma_m=1.5))
 

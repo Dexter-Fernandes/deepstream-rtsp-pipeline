@@ -643,7 +643,11 @@ def _cluster_qualified(
 def _fuse_qualified(
     observations: Iterable[GroundObservation | _QualifiedObservation], config: MtmcConfig
 ) -> dict[TrackletKey, int]:
-    rows = [observation for observation in observations if observation.sigma <= config.max_sigma_m]
+    rows = [
+        observation
+        for observation in observations
+        if np.isfinite(observation.sigma) and 0.0 < observation.sigma <= config.max_sigma_m
+    ]
     support, cooccurrence = _evidence(rows, config)
     lifetimes: dict[TrackletKey, tuple[int, int]] = {}
     for observation in rows:
