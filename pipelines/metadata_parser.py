@@ -14,6 +14,9 @@ class Detection:
     height: float
     source_id: int = -1
     global_id: int = -1
+    generation: int = 0
+    association_bucket: int | None = None
+    association_accepted: bool = True
 
 
 def parse_frame_meta(

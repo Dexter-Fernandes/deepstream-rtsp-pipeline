@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
+from types import MappingProxyType
 
+from pipelines.mtmc_runtime import MtmcBatchReceipt, MtmcIdentitySnapshot
 from pipelines.multi_stream import (
+    FrameReceiptLedger,
     MultiStreamConfig,
     StreamReconnectDetector,
     _make_nvinfer_config,
@@ -18,6 +21,33 @@ from pipelines.multi_stream import (
 
 def test_default_uris_is_empty_list():
     assert MultiStreamConfig().uris == []
+
+
+def test_frame_receipt_ledger_binds_offset_source_frames_and_fails_closed():
+    receipt = MtmcBatchReceipt(
+        identity_snapshot=MtmcIdentitySnapshot(
+            id_map=MappingProxyType({(0, 7): 41, (1, 8): 41}),
+            generations=MappingProxyType({0: 0, 1: 0}),
+        ),
+        attempt_epoch=1,
+        association_bucket=1,
+        association_accepted=True,
+    )
+    ledger = FrameReceiptLedger(expected_sources={0, 1}, max_pending_per_source=2)
+
+    ledger.record(((0, 0), (1, 100)), receipt)
+
+    assert ledger.consume(0, 0) is receipt
+    assert ledger.consume(1, 100) is receipt
+
+    ledger.record(((0, 1),), receipt)
+    assert ledger.consume(0, 2) is None
+    assert ledger.consume(0, 1) is None
+
+    bounded = FrameReceiptLedger(expected_sources={0}, max_pending_per_source=1)
+    bounded.record(((0, 3),), receipt)
+    assert bounded.record(((0, 4),), receipt) == ((0, 3),)
+    assert bounded.consume(0, 4) is None
 
 
 def test_parse_args_single_uri():
@@ -230,6 +260,79 @@ def test_rtsp_clock_and_mux_properties_use_ntp_and_one_frame_timeout():
         "attach-sys-ts": 0,
         "batched-push-timeout": 40_000,
     }
+
+
+def test_rtsp_clock_configuration_enables_deepstream_rtcp_timestamps():
+    from pipelines.multi_stream import configure_rtsp_clock
+
+    class Source:
+        def __init__(self):
+            self.properties = {}
+
+        def __hash__(self):
+            return 41
+
+        def set_property(self, name, value):
+            self.properties[name] = value
+
+    class Pyds:
+        def __init__(self):
+            self.configured_sources = []
+
+        def configure_source_for_ntp_sync(self, source_pointer):
+            self.configured_sources.append(source_pointer)
+
+    source = Source()
+    pyds = Pyds()
+
+    configure_rtsp_clock(source, pyds_module=pyds)
+
+    assert source.properties == {"ntp-sync": True, "buffer-mode": 4}
+    assert pyds.configured_sources == [41]
+
+
+def test_rtsp_clock_gate_waits_for_staggered_sources_and_skips_transition_batch():
+    from pipelines.multi_stream import RtspClockGate
+
+    gate = RtspClockGate(expected_sources={0, 1})
+
+    waiting = gate.observe_batch({0: 0, 1: 0})
+    repeated_wait = gate.observe_batch({0: 0, 1: 0})
+    first_ready = gate.observe_batch({0: 100, 1: 0})
+    transition = gate.observe_batch({0: 101, 1: 102})
+    healthy = gate.observe_batch({0: 103, 1: 104})
+
+    assert waiting.fuse_batch is False
+    assert waiting.waiting_sources == (0, 1)
+    assert repeated_wait.waiting_sources == ()
+    assert first_ready.ready_sources == (0,)
+    assert first_ready.fuse_batch is False
+    assert transition.ready_sources == (1,)
+    assert transition.fuse_batch is False
+    assert transition.advance_liveness is False
+    assert healthy.fuse_batch is True
+    assert healthy.advance_liveness is True
+
+
+def test_rtsp_clock_gate_fails_closed_if_a_ready_source_loses_ntp():
+    from pipelines.multi_stream import RtspClockGate
+
+    gate = RtspClockGate(expected_sources={0, 1})
+    gate.observe_batch({0: 100, 1: 100})
+    assert gate.observe_batch({0: 101, 1: 101}).fuse_batch is True
+
+    clock_loss = gate.observe_batch({0: 0, 1: 102})
+    repeated_loss = gate.observe_batch({0: 0, 1: 103})
+    recovered = gate.observe_batch({0: 104, 1: 104})
+
+    assert clock_loss.fuse_batch is False
+    assert clock_loss.advance_liveness is True
+    assert clock_loss.lost_sources == (0,)
+    assert clock_loss.invalid_sources == (0,)
+    assert repeated_loss.lost_sources == ()
+    assert repeated_loss.invalid_sources == (0,)
+    assert recovered.fuse_batch is True
+    assert recovered.recovered_sources == (0,)
 
 
 def test_reconnect_detector_ignores_initial_connect_and_requires_a_disconnect():

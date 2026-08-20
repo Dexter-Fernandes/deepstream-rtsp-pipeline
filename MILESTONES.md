@@ -274,8 +274,8 @@
 
 ### M3.8.5 — Detection + CSV Identity Contract
 
-- [x] Append defaulted `source_id: int = -1` and `global_id: int = -1` fields to `Detection`
-- [x] Append matching CSV columns without changing existing column names or ordering; readers must accept legacy CSVs via `row.get("global_id", -1)`
+- [x] Append defaulted `source_id`, `global_id`, reconnect `generation`, accepted `association_bucket`, and `association_accepted` fields to `Detection`
+- [x] Append matching CSV columns without changing existing column names or ordering; legacy readers default missing generation to `0`, batch identity to `frame_num`, and acceptance to true
 - [x] Keep tracker `object_id` intact for the single-camera baseline; never overwrite DeepStream object IDs with global IDs
 
 ### M3.8.6 — Online Pipeline + RTSP Correctness
@@ -300,12 +300,12 @@
 
 ### M3.8.8 — Report + End-to-End Verification
 
-- [ ] Add `metrics/mtmc_comparison.ipynb` with single-camera versus pooled IDF1, cross-camera identity metrics, ground-plane MODA/MODP, projection error versus image row, and the parameter-sweep surface
-- [ ] Run the unmodified tracker on all three GT-aligned clips to establish the single-camera GPU baseline
-- [ ] Run offline fusion and tune association on CPU; record the selected configuration and metrics artifact
-- [ ] Run online file-input fusion and verify its final JSON assignment agrees with offline fusion on more than 95% of rows, with differences confined to tracklet warm-up
-- [ ] Soak the RTSP path qualitatively and confirm a person crossing views retains one global ID without `mtmc_desync` under healthy clock conditions
-- [ ] Run `pytest tests/unit -q` and `ruff check .`; keep tracker configs frozen except for comments clarifying that `useUniqueID: 1` provides uniqueness, not cross-camera consistency
+- [x] Add `metrics/mtmc_comparison.ipynb` with single-camera versus pooled IDF1, cross-camera identity metrics, ground-plane MODA/MODP, projection error versus image row, and the parameter-sweep surface
+- [x] Run the unmodified tracker on all three GT-aligned clips to establish the single-camera GPU baseline
+- [x] Run offline fusion and tune association on CPU; record the selected configuration and metrics artifact
+- [x] Run online file-input fusion and verify its final JSON assignment agrees with offline fusion on more than 95% of rows, with differences confined to tracklet warm-up
+- [x] Soak the RTSP path qualitatively and confirm a person crossing views retains one global ID without `mtmc_desync` under healthy clock conditions
+- [x] Run `pytest tests/unit -q` and `ruff check .`; keep tracker configs frozen except for comments clarifying that `useUniqueID: 1` provides uniqueness, not cross-camera consistency
 
 **Known risks:** geometry alone can swap people walking together; far-field uncertainty can make association ambiguous; bad homography calibration invalidates every downstream metric; RTSP clock misuse and reconnect ID reuse cause silent identity corruption; Python map publication crosses streaming threads; and WildTrack's single-plane assumption does not generalise to multi-level scenes. Each risk has an explicit gate or regression test above.
 

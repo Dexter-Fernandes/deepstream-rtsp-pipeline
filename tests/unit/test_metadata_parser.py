@@ -86,6 +86,7 @@ def test_detection_identity_fields_are_backward_compatible_defaults():
 
     assert detection.source_id == -1
     assert detection.global_id == -1
+    assert detection.generation == 0
 
 
 def test_frame_source_id_is_preserved_on_each_detection():

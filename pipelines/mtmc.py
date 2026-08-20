@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import combinations
 from math import hypot, sqrt
 
@@ -23,6 +23,17 @@ class GroundObservation:
     y: float
     sigma: float
     embedding: np.ndarray | None = None
+    generation: int = 0
+    association_bucket: int | None = None
+
+
+@dataclass(frozen=True)
+class MtmcFrame:
+    """One source frame and its projected observations from a muxed batch."""
+
+    timestamp_ns: int
+    source_id: int
+    observations: tuple[GroundObservation, ...]
 
 
 @dataclass(frozen=True)
@@ -35,6 +46,8 @@ class _QualifiedObservation:
     y: float
     sigma: float
     embedding: np.ndarray | None = None
+    association_bucket: int | None = None
+    observation_age_epoch: int | None = None
 
 
 @dataclass
@@ -60,13 +73,37 @@ class MtmcConfig:
     max_skew_ns: int = 100_000_000
 
 
+def atomic_batch_rejection_reason(
+    frames: Iterable[MtmcFrame],
+    *,
+    expected_sources: frozenset[int] | None,
+    max_skew_ns: int,
+) -> str | None:
+    """Return the atomic mux-batch rejection reason without mutating fuser state."""
+    frames = tuple(frames)
+    source_ids = [int(frame.source_id) for frame in frames]
+    observed_sources = set(source_ids)
+    complete = len(observed_sources) == len(source_ids)
+    if expected_sources is not None:
+        complete = complete and observed_sources == expected_sources
+    if not complete:
+        return "missing_sources"
+
+    timestamps = [int(frame.timestamp_ns) for frame in frames]
+    if not timestamps or any(timestamp < 0 for timestamp in timestamps):
+        return "missing_sources"
+    if max(timestamps) - min(timestamps) > max_skew_ns:
+        return "timestamp_skew"
+    return None
+
+
 class MtmcFuser:
     """Collect timestamp buckets and publish cross-camera identity snapshots.
 
     ``observe`` and ``flush_ready`` have one streaming-thread writer. Readers may call
     ``global_id`` or ``id_map`` from other Python threads: publication always rebinds a complete
-    dictionary under the GIL and never mutates the visible dictionary in place. TTL and periodic
-    reassignment intervals are measured in processed timestamp buckets.
+    dictionary under the GIL and never mutates the visible dictionary in place. TTL is measured
+    in liveness attempts; periodic reassignment uses accepted association buckets.
     """
 
     def __init__(
@@ -82,19 +119,27 @@ class MtmcFuser:
         self._pending: dict[int, _BucketState] = {}
         self._observations: list[_QualifiedObservation] = []
         self._all_tracklets: set[TrackletKey] = set()
+        self._historical_tracklets: set[TrackletKey] = set()
+        self._historical_support: dict[tuple[TrackletKey, TrackletKey], int] = defaultdict(int)
+        self._historical_cooccurrence: dict[
+            tuple[TrackletKey, TrackletKey], int
+        ] = defaultdict(int)
+        self._historical_lifetimes: dict[TrackletKey, tuple[int, int]] = {}
         self._id_map: dict[PublicTrackletKey, int] = {}
         self._qualified_id_map: dict[TrackletKey, int] = {}
         self._generations: dict[int, int] = defaultdict(int)
         self._last_seen: dict[TrackletKey, int] = {}
         self._embedding_cache: dict[TrackletKey, np.ndarray] = {}
-        self._latest_processed_bucket: int | None = None
+        self._ingestion_mode: str | None = None
         self._processed_buckets = 0
+        self._attempted_buckets = 0
         self._newest_timestamp_ns: int | None = None
         self._desync_buckets = 0
         self._skew_refusals = 0
         self._next_global_id = 1
 
     def observe(self, timestamp_ns: int, source_id: int, detections: Iterable[object]) -> None:
+        self._select_ingestion_mode("legacy")
         bucket = timestamp_ns // self.config.sync_bucket_ns
         if self._newest_timestamp_ns is None or timestamp_ns > self._newest_timestamp_ns:
             self._newest_timestamp_ns = timestamp_ns
@@ -102,6 +147,102 @@ class MtmcFuser:
         state.earliest_timestamp_ns = min(timestamp_ns, state.earliest_timestamp_ns)
         state.latest_timestamp_ns = max(timestamp_ns, state.latest_timestamp_ns)
         source_observations = state.by_source.setdefault(source_id, [])
+        source_observations.extend(
+            self._qualify_observations(timestamp_ns, source_id, detections)
+        )
+
+    def observe_batch(
+        self,
+        frames: Iterable[MtmcFrame],
+        *,
+        attempt_epoch: int | None = None,
+        association_bucket: int | None = None,
+    ) -> bool:
+        """Atomically validate and accept one mux batch using its true source clocks."""
+        self._start_atomic_attempt(attempt_epoch)
+        observation_age_epoch = self._attempted_buckets
+        frames = tuple(frames)
+        rejection_reason = atomic_batch_rejection_reason(
+            frames,
+            expected_sources=self._expected_sources,
+            max_skew_ns=self.config.max_skew_ns,
+        )
+        if rejection_reason == "missing_sources":
+            self._desync_buckets += 1
+            self._evict_stale_tracklets()
+            return False
+        if rejection_reason == "timestamp_skew":
+            self._skew_refusals += 1
+            self._evict_stale_tracklets()
+            return False
+
+        timestamps = [int(frame.timestamp_ns) for frame in frames]
+        expected_bucket = self._processed_buckets + 1
+        processed_bucket = (
+            expected_bucket if association_bucket is None else int(association_bucket)
+        )
+        if processed_bucket != expected_bucket:
+            raise RuntimeError(
+                "atomic association bucket is out of order: "
+                f"expected {expected_bucket}, got {processed_bucket}"
+            )
+        batch_observations = []
+        for frame in frames:
+            timestamp_ns = int(frame.timestamp_ns)
+            source_id = int(frame.source_id)
+            batch_observations.extend(
+                self._qualify_observations(
+                    timestamp_ns,
+                    source_id,
+                    frame.observations,
+                    association_bucket=processed_bucket,
+                    observation_age_epoch=observation_age_epoch,
+                )
+            )
+
+        self._newest_timestamp_ns = max(
+            max(timestamps),
+            self._newest_timestamp_ns if self._newest_timestamp_ns is not None else max(timestamps),
+        )
+        self._all_tracklets.update(
+            _tracklet_key(observation) for observation in batch_observations
+        )
+        self._record_historical_evidence(batch_observations)
+        for observation in batch_observations:
+            self._last_seen[_tracklet_key(observation)] = observation_age_epoch
+        self._observations.extend(batch_observations)
+        self._processed_buckets = processed_bucket
+        self._evict_stale_tracklets()
+        if self._processed_buckets % self.config.reassign_interval == 0:
+            self._publish_assignments()
+        return True
+
+    def advance_liveness(self, *, attempt_epoch: int | None = None) -> None:
+        """Age atomic live state for one attempt without recording association evidence."""
+        self._start_atomic_attempt(attempt_epoch)
+        self._evict_stale_tracklets()
+
+    def _start_atomic_attempt(self, attempt_epoch: int | None = None) -> None:
+        self._select_ingestion_mode("atomic")
+        expected_epoch = self._attempted_buckets + 1
+        submitted_epoch = expected_epoch if attempt_epoch is None else int(attempt_epoch)
+        if submitted_epoch != expected_epoch:
+            raise RuntimeError(
+                "atomic attempt epoch is out of order: "
+                f"expected {expected_epoch}, got {submitted_epoch}"
+            )
+        self._attempted_buckets = submitted_epoch
+
+    def _qualify_observations(
+        self,
+        timestamp_ns: int,
+        source_id: int,
+        detections: Iterable[object],
+        *,
+        association_bucket: int | None = None,
+        observation_age_epoch: int | None = None,
+    ) -> list[_QualifiedObservation]:
+        observations = []
         for detection in detections:
             sigma = float(detection.sigma)
             if not np.isfinite(sigma) or sigma <= 0.0 or sigma > self.config.max_sigma_m:
@@ -121,8 +262,11 @@ class MtmcFuser:
                 y=float(detection.y),
                 sigma=sigma,
                 embedding=self._embedding_cache.get(tracklet),
+                association_bucket=association_bucket,
+                observation_age_epoch=observation_age_epoch,
             )
-            source_observations.append(observation)
+            observations.append(observation)
+        return observations
 
     def flush_ready(self, *, force: bool = False) -> list[int]:
         flushed: list[int] = []
@@ -146,23 +290,30 @@ class MtmcFuser:
             bucket_observations = []
             for observations in source_rows.values():
                 bucket_observations.extend(observations)
+            processed_bucket = self._processed_buckets + 1
+            self._attempted_buckets += 1
+            observation_age_epoch = self._attempted_buckets
+            bucket_observations = [
+                replace(
+                    observation,
+                    observation_age_epoch=observation_age_epoch,
+                )
+                for observation in bucket_observations
+            ]
             self._all_tracklets.update(
                 _tracklet_key(observation)
                 for observation in bucket_observations
             )
+            self._record_historical_evidence(bucket_observations)
             for observation in bucket_observations:
                 key = _tracklet_key(observation)
-                self._last_seen[key] = max(bucket, self._last_seen.get(key, bucket))
+                self._last_seen[key] = observation_age_epoch
             if skew_refused:
                 self._skew_refusals += 1
             self._observations.extend(bucket_observations)
             del self._pending[bucket]
             flushed.append(bucket)
-            self._processed_buckets += 1
-            self._latest_processed_bucket = max(
-                bucket,
-                self._latest_processed_bucket if self._latest_processed_bucket is not None else bucket,
-            )
+            self._processed_buckets = processed_bucket
             self._evict_stale_tracklets()
             if self._processed_buckets % self.config.reassign_interval == 0:
                 self._publish_assignments()
@@ -170,21 +321,40 @@ class MtmcFuser:
             self._publish_assignments()
         return flushed
 
+    def _record_historical_evidence(
+        self,
+        observations: list[_QualifiedObservation],
+    ) -> None:
+        """Retain bounded sufficient statistics for the shutdown assignment."""
+        support, cooccurrence = _evidence(observations, self.config)
+        for pair, count in support.items():
+            self._historical_support[pair] += count
+        for pair, count in cooccurrence.items():
+            self._historical_cooccurrence[pair] += count
+        for observation in observations:
+            key = _tracklet_key(observation)
+            bucket = _association_bucket(observation, self.config)
+            self._historical_tracklets.add(key)
+            first, last = self._historical_lifetimes.get(key, (bucket, bucket))
+            self._historical_lifetimes[key] = min(first, bucket), max(last, bucket)
+
     def _evict_stale_tracklets(self) -> None:
-        if self._latest_processed_bucket is None:
+        if not self._attempted_buckets:
             return
-        stale = {
-            key
-            for key, last_seen in self._last_seen.items()
-            if self._latest_processed_bucket - last_seen >= self.config.tracklet_ttl
-        }
-        if not stale:
-            return
+        oldest_live_epoch = self._attempted_buckets - self.config.tracklet_ttl + 1
         self._observations = [
             observation
             for observation in self._observations
-            if _tracklet_key(observation) not in stale
+            if observation.observation_age_epoch is not None
+            and observation.observation_age_epoch >= oldest_live_epoch
         ]
+        stale = {
+            key
+            for key, last_seen in self._last_seen.items()
+            if self._attempted_buckets - last_seen >= self.config.tracklet_ttl
+        }
+        if not stale:
+            return
         self._all_tracklets.difference_update(stale)
         for key in stale:
             del self._last_seen[key]
@@ -195,6 +365,12 @@ class MtmcFuser:
             if key not in stale
         }
         self._publish_current_generation()
+
+    def _select_ingestion_mode(self, mode: str) -> None:
+        if self._ingestion_mode is None:
+            self._ingestion_mode = mode
+        elif self._ingestion_mode != mode:
+            raise RuntimeError("cannot mix legacy and atomic MTMC ingestion modes")
 
     def _publish_assignments(self) -> None:
         candidate_map = _fuse_qualified(self._observations, self.config)
@@ -264,14 +440,31 @@ class MtmcFuser:
         """Return active assignments without hiding source generations."""
         return dict(self._qualified_id_map)
 
+    def authoritative_id_map(self) -> dict[TrackletKey, int]:
+        """Fuse whole-run evidence without retaining every observation row.
+
+        Live publication remains TTL-bounded. This final view uses accumulated
+        support, co-occurrence, and lifetime statistics, so expiration cannot
+        fragment the shutdown artifact.
+        """
+        return _cluster_qualified(
+            sorted(self._historical_tracklets),
+            self._historical_support,
+            self._historical_cooccurrence,
+            self._historical_lifetimes,
+            self.config,
+        )
+
     def stats(self) -> dict[str, int]:
         return {
             "processed_buckets": self._processed_buckets,
+            "attempted_buckets": self._attempted_buckets,
             "pending_buckets": len(self._pending),
             "published_tracklets": len(self._id_map),
             "desync_buckets": self._desync_buckets,
             "skew_refusals": self._skew_refusals,
             "active_tracklets": len(self._last_seen),
+            "retained_observations": len(self._observations),
         }
 
 
@@ -281,6 +474,16 @@ def _tracklet_key(observation: GroundObservation | _QualifiedObservation) -> Tra
         getattr(observation, "generation", 0),
         observation.object_id,
     )
+
+
+def _association_bucket(
+    observation: GroundObservation | _QualifiedObservation,
+    config: MtmcConfig,
+) -> int:
+    explicit_bucket = getattr(observation, "association_bucket", None)
+    if explicit_bucket is not None:
+        return int(explicit_bucket)
+    return observation.timestamp_ns // config.sync_bucket_ns
 
 
 def _normalise_embedding(value: object) -> np.ndarray | None:
@@ -325,15 +528,24 @@ def _candidate_cost(
 def _evidence(
     observations: Iterable[GroundObservation | _QualifiedObservation], config: MtmcConfig
 ) -> tuple[dict[tuple[TrackletKey, TrackletKey], int], dict[tuple[TrackletKey, TrackletKey], int]]:
-    buckets: dict[int, list[GroundObservation | _QualifiedObservation]] = defaultdict(list)
+    buckets: dict[
+        tuple[bool, int], list[GroundObservation | _QualifiedObservation]
+    ] = defaultdict(list)
     for observation in observations:
-        buckets[observation.timestamp_ns // config.sync_bucket_ns].append(observation)
+        explicit_bucket = getattr(observation, "association_bucket", None)
+        buckets[(
+            explicit_bucket is not None,
+            _association_bucket(observation, config),
+        )].append(observation)
 
     support: dict[tuple[TrackletKey, TrackletKey], int] = defaultdict(int)
     cooccurrence: dict[tuple[TrackletKey, TrackletKey], int] = defaultdict(int)
-    for bucket in buckets.values():
+    for (explicit_bucket, _), bucket in buckets.items():
         timestamps = [observation.timestamp_ns for observation in bucket]
-        if max(timestamps) - min(timestamps) > config.max_skew_ns:
+        if (
+            not explicit_bucket
+            and max(timestamps) - min(timestamps) > config.max_skew_ns
+        ):
             continue
         by_source: dict[int, list[GroundObservation | _QualifiedObservation]] = defaultdict(list)
         for observation in bucket:
@@ -375,19 +587,14 @@ def _evidence(
     return support, cooccurrence
 
 
-def _fuse_qualified(
-    observations: Iterable[GroundObservation | _QualifiedObservation], config: MtmcConfig
+def _cluster_qualified(
+    keys: Iterable[TrackletKey],
+    support: dict[tuple[TrackletKey, TrackletKey], int],
+    cooccurrence: dict[tuple[TrackletKey, TrackletKey], int],
+    lifetimes: dict[TrackletKey, tuple[int, int]],
+    config: MtmcConfig,
 ) -> dict[TrackletKey, int]:
-    rows = [observation for observation in observations if observation.sigma <= config.max_sigma_m]
-    keys = sorted({_tracklet_key(observation) for observation in rows})
-    support, cooccurrence = _evidence(rows, config)
-    lifetimes: dict[TrackletKey, tuple[int, int]] = {}
-    for observation in rows:
-        key = _tracklet_key(observation)
-        bucket = observation.timestamp_ns // config.sync_bucket_ns
-        first, last = lifetimes.get(key, (bucket, bucket))
-        lifetimes[key] = min(first, bucket), max(last, bucket)
-
+    keys = sorted(keys)
     parent = {key: key for key in keys}
     members = {key: {key} for key in keys}
 
@@ -433,12 +640,37 @@ def _fuse_qualified(
     return {key: global_ids[find(key)] for key in keys}
 
 
+def _fuse_qualified(
+    observations: Iterable[GroundObservation | _QualifiedObservation], config: MtmcConfig
+) -> dict[TrackletKey, int]:
+    rows = [observation for observation in observations if observation.sigma <= config.max_sigma_m]
+    support, cooccurrence = _evidence(rows, config)
+    lifetimes: dict[TrackletKey, tuple[int, int]] = {}
+    for observation in rows:
+        key = _tracklet_key(observation)
+        bucket = _association_bucket(observation, config)
+        first, last = lifetimes.get(key, (bucket, bucket))
+        lifetimes[key] = min(first, bucket), max(last, bucket)
+    return _cluster_qualified(lifetimes, support, cooccurrence, lifetimes, config)
+
+
 def fuse_offline(
     observations: Iterable[GroundObservation], config: MtmcConfig
 ) -> dict[PublicTrackletKey, int]:
     """Associate a finite observation stream and return source-local to global IDs."""
-    qualified = _fuse_qualified(observations, config)
+    qualified = fuse_offline_qualified(observations, config)
     return {
         (source_id, object_id): global_id
         for (source_id, _, object_id), global_id in qualified.items()
     }
+
+
+def fuse_offline_qualified(
+    observations: Iterable[GroundObservation], config: MtmcConfig
+) -> dict[TrackletKey, int]:
+    """Associate a finite stream without collapsing reconnect generations.
+
+    An observation's explicit ``association_bucket`` takes precedence over its
+    timestamp floor, allowing offline evidence to reproduce accepted mux batches.
+    """
+    return _fuse_qualified(observations, config)

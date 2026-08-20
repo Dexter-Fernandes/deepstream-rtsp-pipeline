@@ -2,9 +2,11 @@ import json
 
 import pytest
 
+from metrics.csv_sink import CsvSink
 from metrics.evaluate_mtmc import (
     CameraInput,
     apply_final_id_map,
+    assignment_agreement,
     cross_camera_identity_metrics,
     evaluate_rows,
     fuse_prediction_rows,
@@ -17,7 +19,9 @@ from metrics.evaluate_mtmc import (
     prepare_prediction_rows,
     sweep_fusion_parameters,
 )
-from pipelines.mtmc import MtmcConfig
+from pipelines.metadata_parser import Detection
+from pipelines.mtmc import GroundObservation, MtmcConfig, MtmcFrame
+from pipelines.mtmc_runtime import MtmcRuntime
 
 
 def _write_csv(path, header, rows):
@@ -77,6 +81,8 @@ def test_cli_accepts_offline_fusion_sweep_and_artifact_options(tmp_path):
             "--fuse-offline",
             "--final-map",
             "final.json",
+            "--agreement-warmup-frames",
+            "12",
             "--sweep-min-affinity",
             "0.5",
             "0.8",
@@ -94,6 +100,7 @@ def test_cli_accepts_offline_fusion_sweep_and_artifact_options(tmp_path):
     )
 
     assert args.fuse_offline is True
+    assert args.agreement_warmup_frames == 12
     assert args.sweep_min_affinity == [0.5, 0.8]
     assert args.sweep_z_gate == [2.0, 3.0]
     assert args.ground_gates == [0.5, 1.0]
@@ -305,8 +312,15 @@ def test_prediction_loader_accepts_legacy_and_global_id_csvs(tmp_path):
     _write_csv(legacy_path, base_header, [[0, 10, 1, 2, 3, 4]])
     _write_csv(
         current_path,
-        [*base_header, "source_id", "global_id"],
-        [[0, 20, 5, 6, 7, 8, 1, 88]],
+        [
+            *base_header,
+            "source_id",
+            "global_id",
+            "generation",
+            "association_bucket",
+            "association_accepted",
+        ],
+        [[0, 20, 5, 6, 7, 8, 1, 88, 3, 17, 0]],
     )
     inputs = [
         CameraInput(0, "C1", legacy_path, tmp_path / "h0.json"),
@@ -315,10 +329,37 @@ def test_prediction_loader_accepts_legacy_and_global_id_csvs(tmp_path):
 
     rows = load_prediction_csvs(inputs)
 
-    assert [(row["source_id"], row["object_id"], row["global_id"]) for row in rows] == [
-        (0, 10, -1),
-        (1, 20, 88),
+    assert [
+        (
+            row["source_id"],
+            row["object_id"],
+            row["global_id"],
+            row["generation"],
+            row["association_bucket"],
+            row["association_accepted"],
+        )
+        for row in rows
+    ] == [
+        (0, 10, -1, 0, 0, True),
+        (1, 20, 88, 3, 17, False),
     ]
+
+
+def test_prediction_loader_uses_the_same_person_only_scope_as_online_fusion(tmp_path):
+    prediction_path = tmp_path / "predictions.csv"
+    _write_csv(
+        prediction_path,
+        ["frame_num", "object_id", "class_id", "left", "top", "width", "height"],
+        [
+            [0, 0, 0, 1, 2, 3, 4],
+            [0, 20, 26, 5, 6, 7, 8],
+        ],
+    )
+    inputs = [CameraInput(0, "C1", prediction_path, tmp_path / "h0.json")]
+
+    rows = load_prediction_csvs(inputs)
+
+    assert [(row["object_id"], row["class_id"]) for row in rows] == [(0, 0)]
 
 
 def test_final_assignment_map_overrides_online_warmup_ids(tmp_path):
@@ -343,6 +384,80 @@ def test_final_assignment_map_overrides_online_warmup_ids(tmp_path):
     assert rows[0]["global_id"] == -1
 
 
+def test_assignment_agreement_is_id_permutation_invariant_after_warmup():
+    offline_rows = [
+        {"frame_num": 0, "source_id": 0, "object_id": 1, "global_id": 10},
+        {"frame_num": 0, "source_id": 1, "object_id": 2, "global_id": 20},
+        {"frame_num": 1, "source_id": 0, "object_id": 1, "global_id": 10},
+        {"frame_num": 1, "source_id": 1, "object_id": 2, "global_id": 20},
+    ]
+    online_rows = [
+        {"frame_num": 0, "source_id": 0, "object_id": 1, "global_id": -1},
+        {"frame_num": 0, "source_id": 1, "object_id": 2, "global_id": -1},
+        {"frame_num": 1, "source_id": 0, "object_id": 1, "global_id": 900},
+        {"frame_num": 1, "source_id": 1, "object_id": 2, "global_id": 800},
+    ]
+
+    report = assignment_agreement(offline_rows, online_rows, warmup_frames=1)
+
+    assert report == {
+        "warmup_frames_per_tracklet": 1,
+        "input_rows": 4,
+        "excluded_warmup_rows": 2,
+        "excluded_unassigned_rows": 0,
+        "evaluated_rows": 2,
+        "assigned_on_both_rows": 2,
+        "matched_rows": 2,
+        "disagreement_rows": 0,
+        "agreement": 1.0,
+    }
+
+
+def test_assignment_warmup_starts_at_each_tracklets_first_frame():
+    offline_rows = [
+        {"frame_num": 0, "source_id": 0, "object_id": 1, "global_id": 10},
+        {"frame_num": 1, "source_id": 0, "object_id": 1, "global_id": 10},
+        {"frame_num": 100, "source_id": 1, "object_id": 2, "global_id": 20},
+        {"frame_num": 101, "source_id": 1, "object_id": 2, "global_id": 20},
+    ]
+    online_rows = [
+        {"frame_num": 101, "source_id": 1, "object_id": 2, "global_id": 800},
+        {"frame_num": 100, "source_id": 1, "object_id": 2, "global_id": -1},
+        {"frame_num": 1, "source_id": 0, "object_id": 1, "global_id": 900},
+        {"frame_num": 0, "source_id": 0, "object_id": 1, "global_id": -1},
+    ]
+
+    report = assignment_agreement(offline_rows, online_rows, warmup_frames=1)
+
+    assert report["excluded_warmup_rows"] == 2
+    assert report["evaluated_rows"] == 2
+    assert report["agreement"] == 1.0
+
+
+def test_assignment_agreement_penalises_cluster_fragmentation_one_to_one():
+    offline_rows = [
+        {"frame_num": frame, "source_id": 0, "object_id": frame, "global_id": global_id}
+        for frame, global_id in enumerate((10, 10, 20, 20))
+    ]
+    online_rows = [
+        {"frame_num": frame, "source_id": 0, "object_id": frame, "global_id": global_id}
+        for frame, global_id in enumerate((900, 900, 900, 800))
+    ]
+
+    report = assignment_agreement(offline_rows, online_rows)
+
+    assert report["matched_rows"] == 3
+    assert report["disagreement_rows"] == 1
+    assert report["agreement"] == pytest.approx(0.75)
+
+
+def test_assignment_agreement_rejects_duplicate_detection_keys():
+    row = {"frame_num": 0, "source_id": 0, "object_id": 1, "global_id": 10}
+
+    with pytest.raises(ValueError, match="duplicate offline assignment row"):
+        assignment_agreement([row, row], [row])
+
+
 def test_offline_fusion_ignores_csv_global_ids_and_uses_tracker_observations():
     rows = []
     for frame_num in range(5):
@@ -364,6 +479,234 @@ def test_offline_fusion_ignores_csv_global_ids_and_uses_tracker_observations():
 
     assert {row["global_id"] for row in fused} == {1}
     assert {row["global_id"] for row in rows} == {501, 602}
+
+
+def test_recycled_tracker_id_stays_generation_qualified_from_csv_to_final_agreement(
+    tmp_path,
+):
+    prediction_paths = [tmp_path / f"predictions-{source_id}.csv" for source_id in range(3)]
+    detections_by_source = [
+        [
+            Detection(0, 7, 0, "person", 0.9, 1, 2, 3, 4, source_id=0, generation=0),
+            Detection(1, 7, 0, "person", 0.9, 1, 2, 3, 4, source_id=0, generation=1),
+        ],
+        [Detection(0, 8, 0, "person", 0.9, 1, 2, 3, 4, source_id=1)],
+        [Detection(1, 9, 0, "person", 0.9, 1, 2, 3, 4, source_id=2)],
+    ]
+    for prediction_path, detections in zip(prediction_paths, detections_by_source):
+        sink = CsvSink(prediction_path)
+        sink.write(detections)
+        sink.close()
+    inputs = [
+        CameraInput(source_id, f"C{source_id + 1}", path, tmp_path / f"h{source_id}.json")
+        for source_id, path in enumerate(prediction_paths)
+    ]
+    projected_rows = [
+        {
+            **row,
+            "ground_x": float(row["frame_num"] * 10),
+            "ground_y": 0.0,
+            "sigma": 0.1,
+            "ground_reliable": True,
+        }
+        for row in load_prediction_csvs(inputs)
+    ]
+    config = MtmcConfig(
+        max_distance_m=1.0,
+        min_cooccurrence=1,
+        min_support=1,
+        min_affinity=1.0,
+    )
+    offline_rows = fuse_prediction_rows(projected_rows, config)
+    final_map_path = tmp_path / "mtmc.json"
+    final_map_path.write_text(
+        json.dumps(
+            {
+                "id_map": [
+                    {"source_id": 0, "generation": 0, "object_id": 7, "global_id": 101},
+                    {"source_id": 1, "generation": 0, "object_id": 8, "global_id": 101},
+                    {"source_id": 0, "generation": 1, "object_id": 7, "global_id": 202},
+                    {"source_id": 2, "generation": 0, "object_id": 9, "global_id": 202},
+                ]
+            }
+        )
+    )
+    online_rows = apply_final_id_map(projected_rows, final_map_path)
+
+    source_zero_ids = {
+        row["generation"]: row["global_id"]
+        for row in offline_rows
+        if row["source_id"] == 0
+    }
+    agreement = assignment_agreement(offline_rows, online_rows)
+
+    assert source_zero_ids[0] != source_zero_ids[1]
+    assert agreement["matched_rows"] == 4
+    assert agreement["agreement"] == 1.0
+
+
+def test_offline_frame_batches_match_atomic_online_across_timestamp_bucket_boundaries(
+    tmp_path,
+):
+    config = MtmcConfig(
+        sync_bucket_ns=33_000_000,
+        max_skew_ns=100_000_000,
+        min_cooccurrence=6,
+        min_support=6,
+        min_affinity=1.0,
+        reassign_interval=10,
+    )
+    prediction_paths = [tmp_path / f"offset-{source_id}.csv" for source_id in (0, 1)]
+    sinks = [CsvSink(path) for path in prediction_paths]
+    runtime = MtmcRuntime(config, expected_sources={0, 1})
+    runtime.start()
+    output = tmp_path / "online.json"
+    try:
+        for frame_num in range(6):
+            source_0_timestamp = 32_000_000 + frame_num * 16_683_350
+            source_1_timestamp = source_0_timestamp + 9_744_450
+            frames = []
+            for source_id, object_id, timestamp_ns, source_frame_num in (
+                (0, 10, source_0_timestamp, frame_num),
+                (1, 20, source_1_timestamp, frame_num + 100),
+            ):
+                observation = GroundObservation(
+                    timestamp_ns, source_id, object_id, 1.0, 2.0, 0.1
+                )
+                frames.append(MtmcFrame(timestamp_ns, source_id, (observation,)))
+            receipt = runtime.submit_batch(frames)
+            assert receipt.attempt_epoch == frame_num + 1
+            assert receipt.association_bucket == frame_num + 1
+            assert receipt.association_accepted is True
+            for source_id, object_id, source_frame_num in (
+                (0, 10, frame_num),
+                (1, 20, frame_num + 100),
+            ):
+                sinks[source_id].write(
+                    [
+                        Detection(
+                            source_frame_num,
+                            object_id,
+                            0,
+                            "person",
+                            0.9,
+                            1.0,
+                            2.0,
+                            3.0,
+                            4.0,
+                            source_id=source_id,
+                            generation=receipt.identity_snapshot.generations[source_id],
+                            association_bucket=receipt.association_bucket,
+                            association_accepted=receipt.association_accepted,
+                        )
+                    ]
+                )
+    finally:
+        for sink in sinks:
+            sink.close()
+        runtime.shutdown(json_path=output)
+
+    inputs = [
+        CameraInput(source_id, f"C{source_id + 1}", path, tmp_path / f"h{source_id}.json")
+        for source_id, path in enumerate(prediction_paths)
+    ]
+    projected_rows = [
+        {
+            **row,
+            "ground_x": 1.0,
+            "ground_y": 2.0,
+            "sigma": 0.1,
+            "ground_reliable": True,
+        }
+        for row in load_prediction_csvs(inputs)
+    ]
+    offline_rows = fuse_prediction_rows(projected_rows, config)
+    online_rows = apply_final_id_map(projected_rows, output)
+
+    agreement = assignment_agreement(offline_rows, online_rows)
+
+    assert agreement["matched_rows"] == 12
+    assert agreement["agreement"] == 1.0
+
+
+def test_rejected_receipt_rows_are_labelled_but_do_not_add_offline_evidence():
+    runtime = MtmcRuntime(
+        MtmcConfig(min_cooccurrence=1, min_support=1, min_affinity=1.0),
+        expected_sources={0, 1, 2},
+    )
+    runtime.start()
+    try:
+        accepted_receipt = runtime.submit_batch(
+            (
+                MtmcFrame(0, 0, (GroundObservation(0, 0, 10, 1.0, 2.0, 0.1),)),
+                MtmcFrame(0, 1, (GroundObservation(0, 1, 20, 1.0, 2.0, 0.1),)),
+                MtmcFrame(0, 2, ()),
+            )
+        )
+        rejected_receipt = runtime.advance_liveness()
+    finally:
+        runtime.shutdown()
+
+    assert accepted_receipt.association_accepted is True
+    assert accepted_receipt.association_bucket == 1
+    assert rejected_receipt.association_accepted is False
+    assert rejected_receipt.association_bucket is None
+    assert rejected_receipt.attempt_epoch == 2
+    rows = [
+        {
+            "frame_num": frame_num,
+            "timestamp_ns": frame_num * 500_000_000,
+            "source_id": source_id,
+            "generation": 0,
+            "object_id": object_id,
+            "ground_x": 1.0,
+            "ground_y": 2.0,
+            "sigma": 0.1,
+            "ground_reliable": True,
+            "association_bucket": association_bucket,
+            "association_accepted": accepted,
+        }
+        for frame_num, source_id, object_id, association_bucket, accepted in (
+            (
+                0,
+                0,
+                10,
+                accepted_receipt.association_bucket,
+                accepted_receipt.association_accepted,
+            ),
+            (
+                0,
+                1,
+                20,
+                accepted_receipt.association_bucket,
+                accepted_receipt.association_accepted,
+            ),
+            (
+                1,
+                1,
+                20,
+                rejected_receipt.association_bucket,
+                rejected_receipt.association_accepted,
+            ),
+            (
+                101,
+                2,
+                30,
+                rejected_receipt.association_bucket,
+                rejected_receipt.association_accepted,
+            ),
+        )
+    ]
+
+    fused = fuse_prediction_rows(
+        rows,
+        MtmcConfig(min_cooccurrence=1, min_support=1, min_affinity=1.0),
+    )
+
+    ids = {(row["source_id"], row["object_id"]): row["global_id"] for row in fused}
+    assert len(fused) == len(rows)
+    assert ids[(0, 10)] == ids[(1, 20)]
+    assert ids[(2, 30)] == -1
 
 
 def test_parameter_sweep_reports_each_min_affinity_and_z_gate_combination():

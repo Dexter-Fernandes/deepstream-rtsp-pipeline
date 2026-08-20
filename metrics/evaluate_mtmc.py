@@ -24,7 +24,7 @@ from pipelines.ground_plane import (
     project_point,
     projection_sigma,
 )
-from pipelines.mtmc import GroundObservation, MtmcConfig, fuse_offline
+from pipelines.mtmc import GroundObservation, MtmcConfig, fuse_offline_qualified
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,93 @@ def apply_final_id_map(rows: list[dict], path: Path) -> list[dict]:
     return result
 
 
+def assignment_agreement(
+    offline_rows: list[dict],
+    online_rows: list[dict],
+    *,
+    warmup_frames: int = 0,
+) -> dict[str, int | float]:
+    """Compare row assignments after a one-to-one global-ID permutation.
+
+    The two inputs may use different row ordering, but each qualified detection
+    key must be unique and present on both sides. Warm-up is measured from each
+    tracklet's own first frame. Unassigned rows are ignored only when both sides
+    decline an assignment; a missing assignment on one side counts as
+    disagreement. The optimal one-to-one label mapping deliberately penalises
+    cluster splits and merges.
+    """
+    if warmup_frames < 0:
+        raise ValueError("warmup_frames cannot be negative")
+
+    def index_rows(rows: list[dict], label: str) -> dict[tuple[int, int, int, int], dict]:
+        indexed = {}
+        for row in rows:
+            key = (
+                int(row["source_id"]),
+                int(row.get("generation", 0)),
+                int(row["frame_num"]),
+                int(row["object_id"]),
+            )
+            if key in indexed:
+                raise ValueError(f"duplicate {label} assignment row for key {key}")
+            indexed[key] = row
+        return indexed
+
+    offline_by_key = index_rows(offline_rows, "offline")
+    online_by_key = index_rows(online_rows, "online")
+    if offline_by_key.keys() != online_by_key.keys():
+        raise ValueError("offline and online rows must contain the same detections")
+
+    first_frame: dict[tuple[int, int, int], int] = {}
+    for source_id, generation, frame_num, object_id in offline_by_key:
+        tracklet = source_id, generation, object_id
+        first_frame[tracklet] = min(frame_num, first_frame.get(tracklet, frame_num))
+
+    assigned_pairs: list[tuple[int, int]] = []
+    evaluated_rows = 0
+    excluded_warmup_rows = 0
+    excluded_unassigned_rows = 0
+    for key in sorted(offline_by_key):
+        source_id, generation, frame_num, object_id = key
+        tracklet = source_id, generation, object_id
+        if frame_num - first_frame[tracklet] < warmup_frames:
+            excluded_warmup_rows += 1
+            continue
+
+        offline_id = int(offline_by_key[key].get("global_id", -1))
+        online_id = int(online_by_key[key].get("global_id", -1))
+        if offline_id < 0 and online_id < 0:
+            excluded_unassigned_rows += 1
+            continue
+        evaluated_rows += 1
+        if offline_id >= 0 and online_id >= 0:
+            assigned_pairs.append((offline_id, online_id))
+
+    matched_rows = 0
+    if assigned_pairs:
+        offline_ids = sorted({offline_id for offline_id, _ in assigned_pairs})
+        online_ids = sorted({online_id for _, online_id in assigned_pairs})
+        offline_index = {global_id: index for index, global_id in enumerate(offline_ids)}
+        online_index = {global_id: index for index, global_id in enumerate(online_ids)}
+        contingency = np.zeros((len(offline_ids), len(online_ids)), dtype=np.int64)
+        for offline_id, online_id in assigned_pairs:
+            contingency[offline_index[offline_id], online_index[online_id]] += 1
+        offline_matches, online_matches = mm.lap.linear_sum_assignment(-contingency)
+        matched_rows = int(contingency[offline_matches, online_matches].sum())
+
+    return {
+        "warmup_frames_per_tracklet": int(warmup_frames),
+        "input_rows": len(offline_by_key),
+        "excluded_warmup_rows": excluded_warmup_rows,
+        "excluded_unassigned_rows": excluded_unassigned_rows,
+        "evaluated_rows": evaluated_rows,
+        "assigned_on_both_rows": len(assigned_pairs),
+        "matched_rows": matched_rows,
+        "disagreement_rows": evaluated_rows - matched_rows,
+        "agreement": matched_rows / evaluated_rows if evaluated_rows else 0.0,
+    }
+
+
 def load_prediction_csvs(inputs: list[CameraInput]) -> list[dict]:
     """Load legacy or identity-extended pipeline CSVs using explicit source bindings."""
     rows = []
@@ -69,7 +156,8 @@ def load_prediction_csvs(inputs: list[CameraInput]) -> list[dict]:
         with camera_input.prediction_path.open(newline="") as file:
             for csv_row in csv.DictReader(file):
                 object_id = int(csv_row["object_id"])
-                if object_id == 0:
+                class_id = int(csv_row.get("class_id", "0") or 0)
+                if class_id != 0:
                     continue
                 csv_source = csv_row.get("source_id", "")
                 if csv_source not in ("", "-1") and int(csv_source) != camera_input.source_id:
@@ -78,14 +166,25 @@ def load_prediction_csvs(inputs: list[CameraInput]) -> list[dict]:
                         f"match explicit binding {camera_input.source_id}"
                     )
                 global_value = csv_row.get("global_id", "-1")
+                frame_num = int(csv_row["frame_num"])
+                bucket_value = csv_row.get("association_bucket", "")
+                accepted_value = csv_row.get("association_accepted", "")
                 rows.append(
                     {
-                        "frame_num": int(csv_row["frame_num"]),
-                        "timestamp_ns": int(csv_row["frame_num"]) * 500_000_000,
+                        "frame_num": frame_num,
+                        "timestamp_ns": frame_num * 500_000_000,
                         "camera": camera_input.camera,
                         "source_id": camera_input.source_id,
                         "generation": int(csv_row.get("generation", "0") or 0),
+                        "association_bucket": (
+                            frame_num if bucket_value in (None, "") else int(bucket_value)
+                        ),
+                        "association_accepted": _parse_csv_bool(
+                            accepted_value,
+                            default=True,
+                        ),
                         "object_id": object_id,
+                        "class_id": class_id,
                         "global_id": int(global_value or -1),
                         "left": float(csv_row["left"]),
                         "top": float(csv_row["top"]),
@@ -94,6 +193,19 @@ def load_prediction_csvs(inputs: list[CameraInput]) -> list[dict]:
                     }
                 )
     return rows
+
+
+def _parse_csv_bool(value: object, *, default: bool) -> bool:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    normalised = str(value).strip().lower()
+    if normalised in {"1", "true", "yes"}:
+        return True
+    if normalised in {"0", "false", "no"}:
+        return False
+    raise ValueError(f"invalid CSV boolean {value!r}")
 
 
 def prepare_prediction_rows(inputs: list[CameraInput]) -> list[dict]:
@@ -152,7 +264,12 @@ def fuse_prediction_rows(
     rows: list[dict],
     config: MtmcConfig | None = None,
 ) -> list[dict]:
-    """Fuse projected tracker rows, deliberately ignoring any CSV global IDs."""
+    """Fuse projected rows, deliberately ignoring any CSV global IDs.
+
+    Receipt-backed CSV rows carry the exact accepted mux ``association_bucket``.
+    Rejected rows are retained for output labelling but excluded from association
+    evidence. Legacy aligned files fall back to ``frame_num`` and accepted=True.
+    """
     observations = [
         GroundObservation(
             timestamp_ns=int(row["timestamp_ns"]),
@@ -161,19 +278,26 @@ def fuse_prediction_rows(
             x=float(row["ground_x"]),
             y=float(row["ground_y"]),
             sigma=float(row["sigma"]),
+            generation=int(row.get("generation", 0)),
+            association_bucket=int(row.get("association_bucket", row["frame_num"])),
         )
         for row in rows
         if row.get("ground_reliable", True)
+        and _parse_csv_bool(row.get("association_accepted", True), default=True)
         and "ground_x" in row
         and "ground_y" in row
         and "sigma" in row
     ]
-    id_map = fuse_offline(observations, config or MtmcConfig())
+    id_map = fuse_offline_qualified(observations, config or MtmcConfig())
     return [
         {
             **row,
             "global_id": id_map.get(
-                (int(row["source_id"]), int(row["object_id"])),
+                (
+                    int(row["source_id"]),
+                    int(row.get("generation", 0)),
+                    int(row["object_id"]),
+                ),
                 -1,
             ),
         }
@@ -543,6 +667,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--fuse-offline", action="store_true", dest="fuse_offline")
     parser.add_argument("--final-map", type=Path, default=None, dest="final_map")
+    parser.add_argument(
+        "--agreement-warmup-frames",
+        type=int,
+        default=10,
+        dest="agreement_warmup_frames",
+        help="exclude this many frames from the start of each tracklet",
+    )
     parser.add_argument("--z-gate", type=float, default=3.0, dest="z_gate")
     parser.add_argument("--min-affinity", type=float, default=0.5, dest="min_affinity")
     parser.add_argument("--min-cooccurrence", type=int, default=5, dest="min_cooccurrence")
@@ -584,6 +715,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--camera names must be unique")
     if camera_sources != homography_sources:
         parser.error("--camera and --homography source IDs must match in positional order")
+    if args.agreement_warmup_frames < 0:
+        parser.error("--agreement-warmup-frames cannot be negative")
     return args
 
 
@@ -660,12 +793,23 @@ def main(argv: list[str] | None = None) -> dict:
     )
 
     evaluated_rows = projected_rows
+    offline_rows = None
+    agreement = None
     mode = "csv_global_id"
     if args.fuse_offline:
-        evaluated_rows = fuse_prediction_rows(projected_rows, config)
+        offline_rows = fuse_prediction_rows(projected_rows, config)
+        evaluated_rows = offline_rows
         mode = "offline_fusion"
     if args.final_map is not None:
-        evaluated_rows = apply_final_id_map(evaluated_rows, args.final_map)
+        online_rows = apply_final_id_map(projected_rows, args.final_map)
+        if offline_rows is not None:
+            agreement = assignment_agreement(
+                offline_rows,
+                online_rows,
+                warmup_frames=args.agreement_warmup_frames,
+            )
+        evaluated_rows = online_rows
+        mode = "online_final_map"
 
     report = {
         "inputs": [
@@ -689,6 +833,8 @@ def main(argv: list[str] | None = None) -> dict:
             ground_gates=args.ground_gates,
         ),
     }
+    if agreement is not None:
+        report["assignment_agreement"] = agreement
     if args.sweep:
         report["sweep"] = sweep_fusion_parameters(
             gt_rows,

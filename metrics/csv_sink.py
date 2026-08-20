@@ -5,7 +5,8 @@ from pipelines.metadata_parser import Detection
 
 _HEADER = ["frame_num", "object_id", "class_id", "class_label",
            "confidence", "left", "top", "width", "height",
-           "source_id", "global_id"]
+           "source_id", "global_id", "generation", "association_bucket",
+           "association_accepted"]
 
 
 class CsvSink:
@@ -19,7 +20,9 @@ class CsvSink:
             self._writer.writerow([
                 d.frame_num, d.object_id, d.class_id, d.class_label,
                 d.confidence, d.left, d.top, d.width, d.height,
-                d.source_id, d.global_id,
+                d.source_id, d.global_id, d.generation,
+                "" if d.association_bucket is None else d.association_bucket,
+                int(d.association_accepted),
             ])
         self._file.flush()
 

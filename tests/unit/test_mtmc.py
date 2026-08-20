@@ -1,11 +1,14 @@
 import numpy as np
+import pytest
 
 from pipelines.mtmc import (
     GroundObservation,
     MtmcConfig,
+    MtmcFrame,
     MtmcFuser,
     _candidate_cost,
     fuse_offline,
+    fuse_offline_qualified,
 )
 
 
@@ -281,6 +284,130 @@ def test_tracklet_ttl_evicts_association_state_and_published_entries():
     assert fuser.stats()["active_tracklets"] == 0
 
 
+def test_tracklet_ttl_counts_processed_buckets_not_sparse_timestamp_indices():
+    fuser = MtmcFuser(
+        MtmcConfig(
+            reassign_interval=1,
+            tracklet_ttl=2,
+            sync_bucket_ns=100,
+        ),
+        expected_sources={0},
+    )
+    fuser.observe(0, 0, [GroundObservation(0, 0, 7, 0.0, 0.0, 0.1)])
+    fuser.flush_ready()
+
+    # File inputs may be much slower than the synchronization bucket width. A
+    # single processed frame must still age a tracklet by one bucket, not 100.
+    fuser.observe(10_000, 0, [])
+    fuser.flush_ready()
+    assert fuser.global_id(0, 7) is not None
+
+    fuser.observe(20_000, 0, [])
+    fuser.flush_ready()
+    assert fuser.global_id(0, 7) is None
+
+
+def test_atomic_live_window_prunes_old_rows_from_continuously_active_tracklets():
+    fuser = MtmcFuser(
+        MtmcConfig(
+            min_cooccurrence=20,
+            min_support=20,
+            min_affinity=1.0,
+            reassign_interval=1_000,
+            tracklet_ttl=3,
+            sync_bucket_ns=100,
+        ),
+        expected_sources={0, 1},
+    )
+
+    for batch in range(20):
+        timestamp_ns = batch * 100
+        assert fuser.observe_batch(
+            (
+                MtmcFrame(
+                    timestamp_ns,
+                    0,
+                    (GroundObservation(timestamp_ns, 0, 7, 1.0, 2.0, 0.1),),
+                ),
+                MtmcFrame(
+                    timestamp_ns + 10,
+                    1,
+                    (GroundObservation(timestamp_ns + 10, 1, 8, 1.0, 2.0, 0.1),),
+                ),
+            )
+        )
+
+    assert fuser.stats()["retained_observations"] == 6
+    authoritative = fuser.authoritative_id_map()
+    assert authoritative[(0, 0, 7)] == authoritative[(1, 0, 8)]
+
+
+@pytest.mark.parametrize(
+    "rejected_frames",
+    [
+        (MtmcFrame(200, 0, ()),),
+        (MtmcFrame(200, 0, ()), MtmcFrame(400, 1, ())),
+    ],
+    ids=("missing-source", "timestamp-skew"),
+)
+def test_rejected_atomic_attempts_age_and_evict_stale_live_state(rejected_frames):
+    fuser = MtmcFuser(
+        MtmcConfig(
+            reassign_interval=1,
+            tracklet_ttl=2,
+            sync_bucket_ns=100,
+            max_skew_ns=100,
+        ),
+        expected_sources={0, 1},
+    )
+    assert fuser.observe_batch(
+        (
+            MtmcFrame(100, 0, (GroundObservation(100, 0, 7, 1.0, 2.0, 0.1),)),
+            MtmcFrame(100, 1, ()),
+        )
+    )
+    assert fuser.global_id(0, 7) is not None
+
+    assert fuser.observe_batch(rejected_frames) is False
+    assert fuser.observe_batch(rejected_frames) is False
+
+    assert fuser.global_id(0, 7) is None
+    assert fuser.stats()["active_tracklets"] == 0
+    assert fuser.stats()["attempted_buckets"] == 3
+    assert fuser.stats()["processed_buckets"] == 1
+
+
+def test_legacy_live_window_ages_rows_by_processed_bucket_not_timestamp_floor():
+    fuser = MtmcFuser(
+        MtmcConfig(
+            reassign_interval=1_000,
+            tracklet_ttl=3,
+            sync_bucket_ns=100,
+        ),
+        expected_sources={0},
+    )
+
+    for batch in range(20):
+        timestamp_ns = batch * 10_000
+        fuser.observe(
+            timestamp_ns,
+            0,
+            (GroundObservation(timestamp_ns, 0, 7, 1.0, 2.0, 0.1),),
+        )
+        fuser.flush_ready()
+
+    assert fuser.stats()["retained_observations"] == 3
+    assert fuser.stats()["active_tracklets"] == 1
+
+
+def test_fuser_rejects_mixed_legacy_and_atomic_ingestion_modes():
+    fuser = MtmcFuser(MtmcConfig(), expected_sources={0})
+    fuser.observe(0, 0, ())
+
+    with pytest.raises(RuntimeError, match="cannot mix legacy and atomic"):
+        fuser.observe_batch((MtmcFrame(0, 0, ()),))
+
+
 def test_periodic_reassignment_keeps_existing_global_id_sticky():
     fuser = MtmcFuser(
         MtmcConfig(
@@ -453,6 +580,73 @@ def test_sequential_same_camera_fragments_can_merge_through_another_camera():
     id_map = fuse_offline(observations, config)
 
     assert id_map[(0, 10)] == id_map[(0, 11)] == id_map[(1, 20)]
+
+
+def test_explicit_batch_lifetimes_survive_source_frame_counter_reset():
+    observations = []
+    for association_bucket in (1, 2):
+        source_frame = association_bucket - 1
+        observations.extend(
+            [
+                GroundObservation(
+                    source_frame,
+                    0,
+                    7,
+                    1.0,
+                    2.0,
+                    0.1,
+                    generation=0,
+                    association_bucket=association_bucket,
+                ),
+                GroundObservation(
+                    100 + source_frame,
+                    1,
+                    20,
+                    1.0,
+                    2.0,
+                    0.1,
+                    association_bucket=association_bucket,
+                ),
+            ]
+        )
+    for association_bucket in (3, 4):
+        source_frame = association_bucket - 3
+        observations.extend(
+            [
+                GroundObservation(
+                    source_frame,
+                    0,
+                    7,
+                    1.0,
+                    2.0,
+                    0.1,
+                    generation=1,
+                    association_bucket=association_bucket,
+                ),
+                GroundObservation(
+                    100 + association_bucket,
+                    1,
+                    20,
+                    1.0,
+                    2.0,
+                    0.1,
+                    association_bucket=association_bucket,
+                ),
+            ]
+        )
+
+    id_map = fuse_offline_qualified(
+        observations,
+        MtmcConfig(
+            sync_bucket_ns=1,
+            max_skew_ns=10,
+            min_cooccurrence=2,
+            min_support=2,
+            min_affinity=1.0,
+        ),
+    )
+
+    assert id_map[(0, 0, 7)] == id_map[(0, 1, 7)] == id_map[(1, 0, 20)]
 
 
 def test_support_never_merges_before_minimum_cooccurrence():

@@ -2,13 +2,16 @@ import argparse
 import ctypes
 import logging
 import signal
-from collections.abc import Callable, Mapping
+from collections import deque
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
 
 from pipelines.ground_plane import Homography
-from pipelines.mtmc import MtmcConfig
+from pipelines.mtmc import MtmcConfig, MtmcFrame
 from pipelines.mtmc_runtime import (
+    MtmcBatchReceipt,
     MtmcRuntime,
     frame_timestamp_ns,
     load_homography_bindings,
@@ -77,6 +80,129 @@ class StreamReconnectDetector:
     def disconnected(self) -> None:
         if self._has_connected:
             self._disconnected = True
+
+
+@dataclass(frozen=True)
+class RtspClockBatch:
+    """Clock-state changes and fusion eligibility for one muxed RTSP batch."""
+
+    fuse_batch: bool
+    advance_liveness: bool = False
+    waiting_sources: tuple[int, ...] = ()
+    ready_sources: tuple[int, ...] = ()
+    lost_sources: tuple[int, ...] = ()
+    recovered_sources: tuple[int, ...] = ()
+    invalid_sources: tuple[int, ...] = ()
+
+
+class RtspClockGate:
+    """Hold MTMC batches until every RTSP source has acquired its first RTCP clock."""
+
+    def __init__(self, *, expected_sources: set[int]) -> None:
+        self._expected_sources = frozenset(expected_sources)
+        self._ready_sources: set[int] = set()
+        self._waiting_reported: set[int] = set()
+        self._lost_sources: set[int] = set()
+
+    def observe_batch(self, timestamps: Mapping[int, int]) -> RtspClockBatch:
+        unexpected = set(timestamps).difference(self._expected_sources)
+        if unexpected:
+            raise ValueError(f"unexpected RTSP source {min(unexpected)}")
+        ready_before_batch = self._expected_sources.issubset(self._ready_sources)
+        waiting_sources = []
+        ready_sources = []
+        invalid_sources = []
+        recovered_sources = []
+        for source_id in sorted(self._expected_sources):
+            timestamp_ns = int(timestamps.get(source_id, 0))
+            if int(timestamp_ns) > 0:
+                if source_id not in self._ready_sources:
+                    self._ready_sources.add(source_id)
+                    ready_sources.append(source_id)
+                elif source_id in self._lost_sources:
+                    recovered_sources.append(source_id)
+            elif source_id not in self._ready_sources:
+                if source_id not in self._waiting_reported:
+                    self._waiting_reported.add(source_id)
+                    waiting_sources.append(source_id)
+            else:
+                invalid_sources.append(source_id)
+
+        newly_lost_sources = set(invalid_sources).difference(self._lost_sources)
+        self._lost_sources = set(invalid_sources)
+        complete = set(timestamps) == self._expected_sources
+
+        return RtspClockBatch(
+            fuse_batch=ready_before_batch and complete and not invalid_sources,
+            advance_liveness=ready_before_batch,
+            waiting_sources=tuple(waiting_sources),
+            ready_sources=tuple(ready_sources),
+            lost_sources=tuple(sorted(newly_lost_sources)),
+            recovered_sources=tuple(recovered_sources),
+            invalid_sources=tuple(invalid_sources),
+        )
+
+
+@dataclass(frozen=True)
+class _FrameReceiptEntry:
+    frame_num: int
+    receipt: MtmcBatchReceipt
+
+
+class FrameReceiptLedger:
+    """Bounded exact-FIFO handoff from the mux probe to per-source branches."""
+
+    def __init__(
+        self,
+        *,
+        expected_sources: Iterable[int],
+        max_pending_per_source: int = 1024,
+    ) -> None:
+        if max_pending_per_source < 1:
+            raise ValueError("max_pending_per_source must be positive")
+        expected = frozenset(int(source_id) for source_id in expected_sources)
+        self._queues = {source_id: deque() for source_id in expected}
+        self._poisoned_sources: set[int] = set()
+        self._max_pending_per_source = int(max_pending_per_source)
+        self._lock = Lock()
+
+    def record(
+        self,
+        frames: Iterable[tuple[int, int]],
+        receipt: MtmcBatchReceipt,
+    ) -> tuple[tuple[int, int], ...]:
+        """Record one receipt per source/frame and return any overflowed keys."""
+        dropped = []
+        with self._lock:
+            for source_id, frame_num in frames:
+                source_id = int(source_id)
+                frame_num = int(frame_num)
+                if source_id not in self._queues:
+                    raise ValueError(f"unknown receipt source {source_id}")
+                queue = self._queues[source_id]
+                if len(queue) >= self._max_pending_per_source:
+                    expired = queue.popleft()
+                    dropped.append((source_id, expired.frame_num))
+                    self._poisoned_sources.add(source_id)
+                queue.append(_FrameReceiptEntry(frame_num, receipt))
+        return tuple(dropped)
+
+    def consume(self, source_id: int, frame_num: int) -> MtmcBatchReceipt | None:
+        """Consume only an exact FIFO match; clear a desynchronised source queue."""
+        with self._lock:
+            source_id = int(source_id)
+            queue = self._queues.get(source_id)
+            if not queue:
+                return None
+            if source_id in self._poisoned_sources:
+                queue.clear()
+                self._poisoned_sources.remove(source_id)
+                return None
+            entry = queue.popleft()
+            if entry.frame_num != int(frame_num):
+                queue.clear()
+                return None
+            return entry.receipt
 
 
 @dataclass(frozen=True)
@@ -260,6 +386,16 @@ def rtsp_clock_properties() -> dict[str, object]:
     return {"ntp-sync": True, "buffer-mode": 4}
 
 
+def configure_rtsp_clock(source: object, *, pyds_module: object | None = None) -> None:
+    """Configure one RTSP source to expose RTCP-derived NTP frame metadata."""
+    if pyds_module is None:
+        import pyds as pyds_module
+
+    for property_name, value in rtsp_clock_properties().items():
+        source.set_property(property_name, value)
+    pyds_module.configure_source_for_ntp_sync(hash(source))
+
+
 def mux_timing_properties(uris: list[str]) -> dict[str, object]:
     """Return mux timing properties suitable for live or 2 fps file inputs."""
     is_live = any(not _is_file_uri(uri) for uri in uris)
@@ -374,8 +510,7 @@ def _make_source_bin(
     source.set_property("protocols", 4)
     source.set_property("retry", config.retry)
     source.set_property("timeout", config.timeout_us)
-    for property_name, value in rtsp_clock_properties().items():
-        source.set_property(property_name, value)
+    configure_rtsp_clock(source)
 
     depay.link(decoder)
     decoder.link(queue)
@@ -671,6 +806,16 @@ def run(config: MultiStreamConfig) -> None:
     n = len(config.uris)
     frame_counts = {i: 0 for i in range(n)}
     health_monitor = HealthMonitor(num_sources=n, expected_fps=25.0)
+    rtsp_clock_gate = (
+        RtspClockGate(expected_sources=set(range(n)))
+        if mtmc_runtime is not None and all(not _is_file_uri(uri) for uri in config.uris)
+        else None
+    )
+    mtmc_receipts = (
+        FrameReceiptLedger(expected_sources=range(n))
+        if mtmc_runtime is not None
+        else None
+    )
 
     # Decode probe on the nvinfer SRC pad — fires once per batched buffer before
     # the tracker. Reads NvDsInferTensorMeta (exposed because output-tensor-meta=1
@@ -776,12 +921,86 @@ def run(config: MultiStreamConfig) -> None:
             if batch_meta is None:
                 return Gst.PadProbeReturn.OK
 
+            frame_metas = []
             frame_meta_list = batch_meta.frame_meta_list
             while frame_meta_list is not None:
                 try:
                     frame_meta = pyds.NvDsFrameMeta.cast(frame_meta_list.data)
                 except StopIteration:
                     break
+                frame_metas.append(frame_meta)
+                try:
+                    frame_meta_list = frame_meta_list.next
+                except StopIteration:
+                    break
+
+            frame_keys = tuple(
+                (int(frame_meta.source_id), int(frame_meta.frame_num))
+                for frame_meta in frame_metas
+            )
+
+            def _record_receipt(receipt):
+                assert mtmc_receipts is not None
+                for source_id, frame_num in mtmc_receipts.record(frame_keys, receipt):
+                    log_event(
+                        _log,
+                        logging.WARNING,
+                        source_id=source_id,
+                        event="mtmc_receipt_overflow",
+                        frame_num=frame_num,
+                    )
+
+            if rtsp_clock_gate is not None:
+                ntp_timestamps = {
+                    int(frame_meta.source_id): int(
+                        getattr(frame_meta, "ntp_timestamp", 0)
+                    )
+                    for frame_meta in frame_metas
+                }
+                clock_batch = rtsp_clock_gate.observe_batch(ntp_timestamps)
+                for source_id in clock_batch.waiting_sources:
+                    log_event(
+                        _log,
+                        logging.INFO,
+                        source_id=source_id,
+                        event="mtmc_clock_wait",
+                        reason="waiting_for_rtcp_sender_report",
+                    )
+                for source_id in clock_batch.ready_sources:
+                    log_event(
+                        _log,
+                        logging.INFO,
+                        source_id=source_id,
+                        event="mtmc_clock_ready",
+                        ntp_timestamp_ns=ntp_timestamps[source_id],
+                    )
+                for source_id in clock_batch.lost_sources:
+                    log_event(
+                        _log,
+                        logging.WARNING,
+                        source_id=source_id,
+                        event="mtmc_desync",
+                        reason="invalid_frame_metadata",
+                        detail="RTSP frame has no valid NTP timestamp after clock readiness",
+                    )
+                for source_id in clock_batch.recovered_sources:
+                    log_event(
+                        _log,
+                        logging.INFO,
+                        source_id=source_id,
+                        event="mtmc_clock_recovered",
+                        ntp_timestamp_ns=ntp_timestamps[source_id],
+                    )
+                if not clock_batch.fuse_batch:
+                    if clock_batch.advance_liveness:
+                        receipt = mtmc_runtime.advance_liveness()
+                    else:
+                        receipt = mtmc_runtime.rejected_receipt()
+                    _record_receipt(receipt)
+                    return Gst.PadProbeReturn.OK
+
+            mtmc_frames = []
+            for frame_meta in frame_metas:
                 source_id = int(frame_meta.source_id)
                 try:
                     timestamp_ns = frame_timestamp_ns(
@@ -815,11 +1034,10 @@ def run(config: MultiStreamConfig) -> None:
                         detail=str(exc),
                     )
                 else:
-                    mtmc_runtime.submit(timestamp_ns, source_id, observations)
-                try:
-                    frame_meta_list = frame_meta_list.next
-                except StopIteration:
-                    break
+                    mtmc_frames.append(
+                        MtmcFrame(timestamp_ns, source_id, observations)
+                    )
+            _record_receipt(mtmc_runtime.submit_batch(mtmc_frames))
             return Gst.PadProbeReturn.OK
 
         attach_mtmc_probe(
@@ -852,15 +1070,37 @@ def run(config: MultiStreamConfig) -> None:
             source_id = frame_meta.source_id
             frame_counts[source_id] = frame_counts.get(source_id, 0) + 1
             detections = _parse_frame_detections(frame_meta)
-            id_map = (
-                mtmc_runtime.id_map_snapshot()
-                if mtmc_runtime is not None
-                else {}
+            receipt = (
+                mtmc_receipts.consume(int(source_id), int(frame_meta.frame_num))
+                if mtmc_receipts is not None
+                else None
             )
+            if mtmc_runtime is not None and receipt is None:
+                log_event(
+                    _log,
+                    logging.WARNING,
+                    source_id=source_id,
+                    event="mtmc_receipt_mismatch",
+                    frame_num=int(frame_meta.frame_num),
+                )
+            id_map = receipt.identity_snapshot.id_map if receipt is not None else {}
             detections = with_global_ids(
                 detections,
                 source_id=source_id,
                 id_map=id_map,
+                generation=(
+                    receipt.identity_snapshot.generations[source_id]
+                    if receipt is not None
+                    else (-1 if mtmc_runtime is not None else 0)
+                ),
+                association_bucket=(
+                    receipt.association_bucket if receipt is not None else None
+                ),
+                association_accepted=(
+                    receipt.association_accepted
+                    if receipt is not None
+                    else mtmc_runtime is None
+                ),
             )
             if mtmc_runtime is not None and config.mtmc_osd_labels:
                 _apply_mtmc_osd_labels(frame_meta, id_map)

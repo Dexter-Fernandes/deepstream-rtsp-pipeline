@@ -20,7 +20,13 @@ from pipelines.ground_plane import (
     projection_sigma,
 )
 from pipelines.metadata_parser import Detection
-from pipelines.mtmc import GroundObservation, MtmcConfig, MtmcFuser
+from pipelines.mtmc import (
+    GroundObservation,
+    MtmcConfig,
+    MtmcFrame,
+    MtmcFuser,
+    atomic_batch_rejection_reason,
+)
 
 _FILE_FRAME_INTERVAL_NS = 500_000_000
 _STOP = object()
@@ -34,9 +40,38 @@ class _ObservationBatch:
 
 
 @dataclass(frozen=True)
+class _MuxBatch:
+    frames: tuple[MtmcFrame, ...]
+    receipt: "MtmcBatchReceipt"
+
+
+@dataclass(frozen=True)
+class _LivenessAttempt:
+    receipt: "MtmcBatchReceipt"
+
+
+@dataclass(frozen=True)
 class _GenerationBump:
     source_id: int
     generation: int
+
+
+@dataclass(frozen=True)
+class MtmcIdentitySnapshot:
+    """One atomic view of live IDs and their source generations."""
+
+    id_map: Mapping[tuple[int, int], int]
+    generations: Mapping[int, int]
+
+
+@dataclass(frozen=True)
+class MtmcBatchReceipt:
+    """Immutable identity and association decision bound to one mux attempt."""
+
+    identity_snapshot: MtmcIdentitySnapshot
+    attempt_epoch: int | None
+    association_bucket: int | None
+    association_accepted: bool
 
 
 class MtmcRuntime:
@@ -50,14 +85,21 @@ class MtmcRuntime:
         on_desync: Callable[[Mapping[str, object]], None] | None = None,
     ) -> None:
         expected = frozenset(int(source_id) for source_id in expected_sources)
+        self._config = config
+        self._expected_sources = expected
         self._fuser = MtmcFuser(config, expected_sources=expected)
         self._on_desync = on_desync
         self._queue: Queue[object] = Queue()
-        self._id_map: Mapping[tuple[int, int], int] = MappingProxyType({})
         self._qualified_id_map: Mapping[tuple[int, int, int], int] = MappingProxyType({})
-        self._assignment_history: dict[tuple[int, int, int], int] = {}
         self._stats: Mapping[str, int] = MappingProxyType({})
         self._generations = {source_id: 0 for source_id in expected}
+        self._identity_snapshot = MtmcIdentitySnapshot(
+            id_map=MappingProxyType({}),
+            generations=MappingProxyType(dict(self._generations)),
+        )
+        self._submission_mode: str | None = None
+        self._submitted_attempts = 0
+        self._submitted_association_buckets = 0
         self._submission_lock = Lock()
         self._thread: Thread | None = None
         self._started = False
@@ -84,12 +126,69 @@ class MtmcRuntime:
             self._require_running()
             if source_id not in self._generations:
                 raise ValueError(f"unknown MTMC source {source_id}")
+            self._select_submission_mode("legacy")
             self._queue.put(
                 _ObservationBatch(
                     timestamp_ns=int(timestamp_ns),
                     source_id=int(source_id),
                     observations=tuple(observations),
                 )
+            )
+
+    def submit_batch(self, frames: Iterable[MtmcFrame]) -> MtmcBatchReceipt:
+        """Queue one immutable mux batch and return its frame-bound decision."""
+        with self._submission_lock:
+            self._require_running()
+            immutable_frames = tuple(frames)
+            for frame in immutable_frames:
+                if frame.source_id not in self._generations:
+                    raise ValueError(f"unknown MTMC source {frame.source_id}")
+            self._select_submission_mode("atomic")
+            self._submitted_attempts += 1
+            rejection_reason = atomic_batch_rejection_reason(
+                immutable_frames,
+                expected_sources=self._expected_sources,
+                max_skew_ns=self._config.max_skew_ns,
+            )
+            accepted = rejection_reason is None
+            association_bucket = None
+            if accepted:
+                self._submitted_association_buckets += 1
+                association_bucket = self._submitted_association_buckets
+            receipt = MtmcBatchReceipt(
+                identity_snapshot=self._identity_snapshot,
+                attempt_epoch=self._submitted_attempts,
+                association_bucket=association_bucket,
+                association_accepted=accepted,
+            )
+            self._queue.put(_MuxBatch(immutable_frames, receipt))
+            return receipt
+
+    def advance_liveness(self) -> MtmcBatchReceipt:
+        """Queue one rejected attempt and return its frame-bound decision."""
+        with self._submission_lock:
+            self._require_running()
+            self._select_submission_mode("atomic")
+            self._submitted_attempts += 1
+            receipt = MtmcBatchReceipt(
+                identity_snapshot=self._identity_snapshot,
+                attempt_epoch=self._submitted_attempts,
+                association_bucket=None,
+                association_accepted=False,
+            )
+            self._queue.put(_LivenessAttempt(receipt))
+            return receipt
+
+    def rejected_receipt(self) -> MtmcBatchReceipt:
+        """Return a no-attempt receipt for frames rejected before clock readiness."""
+        with self._submission_lock:
+            self._require_running()
+            self._select_submission_mode("atomic")
+            return MtmcBatchReceipt(
+                identity_snapshot=self._identity_snapshot,
+                attempt_epoch=None,
+                association_bucket=None,
+                association_accepted=False,
             )
 
     def bump_generation(self, source_id: int) -> int:
@@ -100,19 +199,27 @@ class MtmcRuntime:
                 raise ValueError(f"unknown MTMC source {source_id}")
             generation = self._generations[source_id] + 1
             self._generations[source_id] = generation
-            self._id_map = MappingProxyType(
-                {
-                    key: global_id
-                    for key, global_id in self._id_map.items()
-                    if key[0] != source_id
-                }
+            current = self._identity_snapshot
+            self._identity_snapshot = MtmcIdentitySnapshot(
+                id_map=MappingProxyType(
+                    {
+                        key: global_id
+                        for key, global_id in current.id_map.items()
+                        if key[0] != source_id
+                    }
+                ),
+                generations=MappingProxyType(dict(self._generations)),
             )
             self._queue.put(_GenerationBump(source_id, generation))
             return generation
 
     def id_map_snapshot(self) -> Mapping[tuple[int, int], int]:
         """Return the currently published immutable source-local ID map."""
-        return self._id_map
+        return self._identity_snapshot.id_map
+
+    def identity_snapshot(self) -> MtmcIdentitySnapshot:
+        """Return IDs and source generations from one atomic publication."""
+        return self._identity_snapshot
 
     def wait_until_idle(self) -> None:
         """Wait for queued work; intended for tests and orderly shutdown only."""
@@ -155,6 +262,24 @@ class MtmcRuntime:
                                 f"worker={generation}, submitted={work.generation}"
                             )
                         self._publish_snapshot()
+                    elif isinstance(work, _LivenessAttempt):
+                        self._fuser.advance_liveness(
+                            attempt_epoch=work.receipt.attempt_epoch
+                        )
+                        self._publish_snapshot()
+                    elif isinstance(work, _MuxBatch):
+                        stats_before = self._fuser.stats()
+                        accepted = self._fuser.observe_batch(
+                            work.frames,
+                            attempt_epoch=work.receipt.attempt_epoch,
+                            association_bucket=work.receipt.association_bucket,
+                        )
+                        if accepted != work.receipt.association_accepted:
+                            raise RuntimeError(
+                                "atomic mux decision changed between submission and fusion"
+                            )
+                        self._report_desync(stats_before, self._fuser.stats())
+                        self._publish_snapshot()
                     else:
                         assert isinstance(work, _ObservationBatch)
                         self._fuser.observe(
@@ -176,20 +301,23 @@ class MtmcRuntime:
         qualified = self._fuser.qualified_id_map()
         with self._submission_lock:
             generations = dict(self._generations)
-        self._assignment_history.update(qualified)
-        self._qualified_id_map = MappingProxyType(qualified)
-        self._id_map = MappingProxyType(
-            {
-                (source_id, object_id): global_id
-                for (source_id, generation, object_id), global_id in qualified.items()
-                if generation == generations[source_id]
-            }
-        )
+            self._qualified_id_map = MappingProxyType(qualified)
+            self._identity_snapshot = MtmcIdentitySnapshot(
+                id_map=MappingProxyType(
+                    {
+                        (source_id, object_id): global_id
+                        for (source_id, generation, object_id), global_id in qualified.items()
+                        if generation == generations[source_id]
+                    }
+                ),
+                generations=MappingProxyType(generations),
+            )
         self._stats = MappingProxyType(self._fuser.stats())
 
     def _write_json(self, path: str | Path) -> None:
         output_path = Path(path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        authoritative = self._fuser.authoritative_id_map()
         rows = [
             {
                 "source_id": source_id,
@@ -198,7 +326,7 @@ class MtmcRuntime:
                 "global_id": global_id,
             }
             for (source_id, generation, object_id), global_id in sorted(
-                self._assignment_history.items()
+                authoritative.items()
             )
         ]
         output_path.write_text(
@@ -245,6 +373,12 @@ class MtmcRuntime:
         if not self._started or self._closed:
             raise RuntimeError("MTMC runtime is not running")
         self._raise_worker_failure()
+
+    def _select_submission_mode(self, mode: str) -> None:
+        if self._submission_mode is None:
+            self._submission_mode = mode
+        elif self._submission_mode != mode:
+            raise RuntimeError("cannot mix legacy and atomic MTMC submission modes")
 
     def _raise_worker_failure(self) -> None:
         if self._failure is not None:
@@ -329,6 +463,9 @@ def with_global_ids(
     *,
     source_id: int,
     id_map: Mapping[tuple[int, int], int],
+    generation: int = 0,
+    association_bucket: int | None = None,
+    association_accepted: bool = True,
 ) -> list[Detection]:
     """Return CSV-ready detections while preserving local tracker object IDs."""
     return [
@@ -336,6 +473,9 @@ def with_global_ids(
             detection,
             source_id=source_id,
             global_id=id_map.get((source_id, int(detection.object_id)), -1),
+            generation=generation,
+            association_bucket=association_bucket,
+            association_accepted=association_accepted,
         )
         for detection in detections
     ]

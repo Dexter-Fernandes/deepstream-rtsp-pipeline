@@ -16,6 +16,8 @@ TargetManagement:
   earlyTerminationAge: 1
 
 TrajectoryManagement:
+  # Setting useUniqueID: 1 prevents numeric collisions; it does not make IDs
+  # consistent across cameras. Cross-camera identity comes from the MTMC layer.
   useUniqueID: 0
 
 DataAssociator:

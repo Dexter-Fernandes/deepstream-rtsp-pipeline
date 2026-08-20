@@ -1,12 +1,14 @@
+import csv
 import json
-from threading import get_ident
+from threading import Event, get_ident
 
 import numpy as np
 import pytest
 
+from metrics.csv_sink import CsvSink
 from pipelines.ground_plane import Homography
 from pipelines.metadata_parser import Detection
-from pipelines.mtmc import GroundObservation, MtmcConfig
+from pipelines.mtmc import GroundObservation, MtmcConfig, MtmcFrame
 from pipelines.mtmc_runtime import (
     MtmcRuntime,
     frame_timestamp_ns,
@@ -137,13 +139,20 @@ def test_unprojectable_bbox_is_skipped_without_losing_other_people():
 def test_global_ids_are_read_from_snapshot_without_replacing_tracker_ids():
     detection = Detection(3, 17, 0, "person", 0.9, 1.0, 2.0, 3.0, 4.0)
 
-    annotated = with_global_ids([detection], source_id=2, id_map={(2, 17): 41})
+    annotated = with_global_ids(
+        [detection],
+        source_id=2,
+        id_map={(2, 17): 41},
+        generation=3,
+    )
 
     assert annotated[0].source_id == 2
     assert annotated[0].global_id == 41
+    assert annotated[0].generation == 3
     assert annotated[0].object_id == 17
     assert detection.source_id == -1
     assert detection.global_id == -1
+    assert detection.generation == 0
 
 
 def test_runtime_publishes_an_immutable_assignment_snapshot_from_its_worker():
@@ -174,6 +183,308 @@ def test_runtime_publishes_an_immutable_assignment_snapshot_from_its_worker():
         assert snapshot[(0, 10)] == snapshot[(1, 20)]
         with pytest.raises(TypeError):
             snapshot[(0, 10)] = 99
+    finally:
+        runtime.shutdown()
+
+
+def test_runtime_identity_snapshot_atomically_pairs_ids_with_source_generations():
+    runtime = MtmcRuntime(
+        MtmcConfig(reassign_interval=1),
+        expected_sources={0},
+    )
+    runtime.start()
+    try:
+        runtime.submit_batch(
+            (
+                MtmcFrame(
+                    0,
+                    0,
+                    (GroundObservation(0, 0, 7, 1.0, 2.0, 0.1),),
+                ),
+            )
+        )
+        runtime.wait_until_idle()
+        generation_zero = runtime.identity_snapshot()
+
+        runtime.bump_generation(0)
+        generation_one = runtime.identity_snapshot()
+        runtime.submit_batch(
+            (
+                MtmcFrame(
+                    1,
+                    0,
+                    (GroundObservation(1, 0, 7, 3.0, 4.0, 0.1),),
+                ),
+            )
+        )
+        runtime.wait_until_idle()
+        republished_generation_one = runtime.identity_snapshot()
+        annotated = with_global_ids(
+            [Detection(1, 7, 0, "person", 0.9, 1.0, 2.0, 3.0, 4.0)],
+            source_id=0,
+            id_map=republished_generation_one.id_map,
+            generation=republished_generation_one.generations[0],
+        )
+
+        assert generation_zero.generations[0] == 0
+        assert (0, 7) in generation_zero.id_map
+        assert generation_one.generations[0] == 1
+        assert (0, 7) not in generation_one.id_map
+        assert republished_generation_one.generations[0] == 1
+        assert (0, 7) in republished_generation_one.id_map
+        assert annotated[0].generation == 1
+        assert annotated[0].global_id == republished_generation_one.id_map[(0, 7)]
+        with pytest.raises(TypeError):
+            generation_one.generations[0] = 2
+    finally:
+        runtime.shutdown()
+
+
+def test_submitted_batch_receipt_keeps_inflight_frame_on_original_generation(tmp_path):
+    entered_worker = Event()
+    release_worker = Event()
+
+    class BlockingObservation:
+        object_id = 7
+        x = 1.0
+        y = 2.0
+        embedding = None
+
+        @property
+        def sigma(self):
+            entered_worker.set()
+            assert release_worker.wait(timeout=2)
+            return 0.1
+
+    runtime = MtmcRuntime(MtmcConfig(reassign_interval=1), expected_sources={0})
+    runtime.start()
+    try:
+        receipt = runtime.submit_batch(
+            (MtmcFrame(0, 0, (BlockingObservation(),)),)
+        )
+        assert entered_worker.wait(timeout=2)
+
+        runtime.bump_generation(0)
+        annotated = with_global_ids(
+            [Detection(0, 7, 0, "person", 0.9, 1.0, 2.0, 3.0, 4.0)],
+            source_id=0,
+            id_map=receipt.identity_snapshot.id_map,
+            generation=receipt.identity_snapshot.generations[0],
+            association_bucket=receipt.association_bucket,
+            association_accepted=receipt.association_accepted,
+        )
+
+        assert annotated[0].generation == 0
+        assert annotated[0].association_bucket == 1
+        assert annotated[0].association_accepted is True
+        csv_path = tmp_path / "old-frame.csv"
+        sink = CsvSink(csv_path)
+        sink.write(annotated)
+        sink.close()
+        row = next(csv.DictReader(csv_path.open()))
+        assert int(row["generation"]) == 0
+        assert int(row["association_bucket"]) == 1
+    finally:
+        release_worker.set()
+        runtime.shutdown()
+
+
+def test_atomic_mux_batches_survive_5994fps_bucket_boundaries(tmp_path):
+    output = tmp_path / "mtmc.json"
+    events = []
+    runtime = MtmcRuntime(
+        MtmcConfig(
+            sync_bucket_ns=33_000_000,
+            max_skew_ns=100_000_000,
+            min_cooccurrence=1,
+            min_support=1,
+            min_affinity=1.0,
+            reassign_interval=1,
+        ),
+        expected_sources={0, 1},
+        on_desync=events.append,
+    )
+    runtime.start()
+    try:
+        for frame_num in range(6):
+            source_0_timestamp = 32_000_000 + frame_num * 16_683_350
+            source_1_timestamp = source_0_timestamp + 9_744_450
+            runtime.submit_batch(
+                (
+                    MtmcFrame(
+                        source_0_timestamp,
+                        0,
+                        (
+                            GroundObservation(
+                                source_0_timestamp, 0, 10, 1.0, 2.0, 0.1
+                            ),
+                        ),
+                    ),
+                    MtmcFrame(
+                        source_1_timestamp,
+                        1,
+                        (
+                            GroundObservation(
+                                source_1_timestamp, 1, 20, 1.0, 2.0, 0.1
+                            ),
+                        ),
+                    ),
+                )
+            )
+        runtime.wait_until_idle()
+    finally:
+        runtime.shutdown(json_path=output)
+
+    payload = json.loads(output.read_text())
+    assignments = {
+        (row["source_id"], row["object_id"]): row["global_id"]
+        for row in payload["id_map"]
+    }
+    assert assignments[(0, 10)] == assignments[(1, 20)]
+    assert payload["stats"]["processed_buckets"] == 6
+    assert payload["stats"]["pending_buckets"] == 0
+    assert events == []
+
+
+def test_receipt_attempts_include_rejections_but_association_buckets_do_not(tmp_path):
+    output = tmp_path / "mtmc.json"
+    runtime = MtmcRuntime(MtmcConfig(reassign_interval=1), expected_sources={0})
+    runtime.start()
+    try:
+        first = runtime.submit_batch((MtmcFrame(0, 0, ()),))
+        rejected = runtime.advance_liveness()
+        second = runtime.submit_batch((MtmcFrame(1, 0, ()),))
+    finally:
+        runtime.shutdown(json_path=output)
+
+    assert (first.attempt_epoch, first.association_bucket) == (1, 1)
+    assert (rejected.attempt_epoch, rejected.association_bucket) == (2, None)
+    assert (second.attempt_epoch, second.association_bucket) == (3, 2)
+    assert first.association_accepted is True
+    assert rejected.association_accepted is False
+    assert second.association_accepted is True
+    stats = json.loads(output.read_text())["stats"]
+    assert stats["attempted_buckets"] == 3
+    assert stats["processed_buckets"] == 2
+
+
+def test_atomic_mux_batch_rejects_missing_sources(tmp_path):
+    output = tmp_path / "mtmc.json"
+    events = []
+    runtime = MtmcRuntime(
+        MtmcConfig(reassign_interval=1),
+        expected_sources={0, 1},
+        on_desync=events.append,
+    )
+    runtime.start()
+    try:
+        runtime.submit_batch(
+            (
+                MtmcFrame(
+                    100,
+                    0,
+                    (GroundObservation(100, 0, 10, 1.0, 2.0, 0.1),),
+                ),
+            )
+        )
+        runtime.wait_until_idle()
+    finally:
+        runtime.shutdown(json_path=output)
+
+    payload = json.loads(output.read_text())
+    assert payload["id_map"] == []
+    assert payload["stats"]["processed_buckets"] == 0
+    assert payload["stats"]["desync_buckets"] == 1
+    assert [event["reason"] for event in events] == ["missing_sources"]
+
+
+def test_atomic_mux_batch_rejects_true_timestamp_skew_above_limit(tmp_path):
+    output = tmp_path / "mtmc.json"
+    events = []
+    runtime = MtmcRuntime(
+        MtmcConfig(max_skew_ns=100_000_000, reassign_interval=1),
+        expected_sources={0, 1},
+        on_desync=events.append,
+    )
+    runtime.start()
+    try:
+        runtime.submit_batch(
+            (
+                MtmcFrame(
+                    1_000_000_000,
+                    0,
+                    (
+                        GroundObservation(
+                            1_000_000_000, 0, 10, 1.0, 2.0, 0.1
+                        ),
+                    ),
+                ),
+                MtmcFrame(
+                    1_100_000_001,
+                    1,
+                    (
+                        GroundObservation(
+                            1_100_000_001, 1, 20, 1.0, 2.0, 0.1
+                        ),
+                    ),
+                ),
+            )
+        )
+        runtime.wait_until_idle()
+    finally:
+        runtime.shutdown(json_path=output)
+
+    payload = json.loads(output.read_text())
+    assert payload["id_map"] == []
+    assert payload["stats"]["processed_buckets"] == 0
+    assert payload["stats"]["skew_refusals"] == 1
+    assert [event["reason"] for event in events] == ["timestamp_skew"]
+
+
+def test_clock_rejection_advances_liveness_without_desync_callback(tmp_path):
+    output = tmp_path / "mtmc.json"
+    events = []
+    runtime = MtmcRuntime(
+        MtmcConfig(reassign_interval=1, tracklet_ttl=2),
+        expected_sources={0},
+        on_desync=events.append,
+    )
+    runtime.start()
+    try:
+        runtime.submit_batch(
+            (
+                MtmcFrame(
+                    0,
+                    0,
+                    (GroundObservation(0, 0, 7, 1.0, 2.0, 0.1),),
+                ),
+            )
+        )
+        runtime.wait_until_idle()
+        assert runtime.id_map_snapshot()[(0, 7)] > 0
+
+        runtime.advance_liveness()
+        runtime.advance_liveness()
+        runtime.wait_until_idle()
+        assert (0, 7) not in runtime.id_map_snapshot()
+    finally:
+        runtime.shutdown(json_path=output)
+
+    stats = json.loads(output.read_text())["stats"]
+    assert stats["processed_buckets"] == 1
+    assert stats["attempted_buckets"] == 3
+    assert stats["desync_buckets"] == 0
+    assert events == []
+
+
+def test_runtime_rejects_mixed_legacy_and_atomic_submission_modes():
+    runtime = MtmcRuntime(MtmcConfig(), expected_sources={0})
+    runtime.start()
+    try:
+        runtime.submit(0, 0, ())
+
+        with pytest.raises(RuntimeError, match="cannot mix legacy and atomic"):
+            runtime.submit_batch((MtmcFrame(0, 0, ()),))
     finally:
         runtime.shutdown()
 
@@ -288,3 +599,40 @@ def test_shutdown_json_retains_assignments_evicted_from_the_live_ttl_map(tmp_pat
         "object_id": 7,
         "global_id": global_id,
     } in json.loads(output.read_text())["id_map"]
+
+
+def test_shutdown_json_fuses_evidence_across_live_ttl_windows(tmp_path):
+    output = tmp_path / "mtmc-history.json"
+    runtime = MtmcRuntime(
+        MtmcConfig(
+            min_cooccurrence=2,
+            min_support=2,
+            min_affinity=1.0,
+            reassign_interval=1,
+            tracklet_ttl=1,
+            sync_bucket_ns=100,
+        ),
+        expected_sources={0, 1},
+    )
+    runtime.start()
+    for timestamp_ns in (0, 200):
+        runtime.submit(
+            timestamp_ns,
+            0,
+            (GroundObservation(timestamp_ns, 0, 7, 1.0, 2.0, 0.1),),
+        )
+        runtime.submit(
+            timestamp_ns,
+            1,
+            (GroundObservation(timestamp_ns, 1, 8, 1.0, 2.0, 0.1),),
+        )
+        if timestamp_ns == 0:
+            runtime.submit(100, 0, ())
+            runtime.submit(100, 1, ())
+    runtime.shutdown(json_path=output)
+
+    assignments = {
+        (row["source_id"], row["object_id"]): row["global_id"]
+        for row in json.loads(output.read_text())["id_map"]
+    }
+    assert assignments[(0, 7)] == assignments[(1, 8)]
