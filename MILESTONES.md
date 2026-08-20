@@ -280,15 +280,15 @@
 
 ### M3.8.6 — Online Pipeline + RTSP Correctness
 
-- [ ] Add MTMC only behind `--mtmc`; place its probe on the SGIE source pad, or the tracker source pad when appearance is disabled
-- [ ] Add repeatable `--homography SOURCE_ID=PATH` plus `--mtmc-z-gate`, `--mtmc-min-affinity`, `--mtmc-reassign-interval`, `--mtmc-json`, `--mtmc-osd-labels`, `--mtmc-sync-bucket-ms`, and `--mtmc-max-skew-ms`
-- [ ] For 2 fps files, derive deterministic timestamps from `frame_num`; for RTSP, use `frame_meta.ntp_timestamp` with `rtspsrc ntp-sync=true`, `buffer-mode=synced`, and mux `attach-sys-ts=0`
-- [ ] Refuse unsafe fusion when pairwise observation skew exceeds the configured maximum (default 100 ms) and emit `mtmc_desync` through `log_event`
-- [ ] Increment per-source generation on the existing `stream_reconnect` event and evict stale published mappings after TTL expiry
-- [ ] Set mux `live-source=1` for RTSP and reduce `batched-push-timeout` from four seconds to approximately one frame interval so one stalled source cannot hold a batch for seconds
-- [ ] Read global IDs from the in-process immutable map in downstream CSV/OSD probes; do not use Python `NvDsUserMeta`, `misc_obj_info`, or mutate `obj_meta.object_id`
-- [ ] Dump the final authoritative assignment to `--mtmc-json` at shutdown so evaluation can backfill the expected online reassignment warm-up
-- [ ] Keep periodic reassignment off the streaming thread on the live path by processing immutable state snapshots in a worker
+- [x] Add MTMC only behind `--mtmc`; place its probe on the SGIE source pad, or the tracker source pad when appearance is disabled
+- [x] Add repeatable `--homography SOURCE_ID=PATH` plus `--mtmc-z-gate`, `--mtmc-min-affinity`, `--mtmc-reassign-interval`, `--mtmc-json`, `--mtmc-osd-labels`, `--mtmc-sync-bucket-ms`, and `--mtmc-max-skew-ms`
+- [x] For 2 fps files, derive deterministic timestamps from `frame_num`; for RTSP, use `frame_meta.ntp_timestamp` with `rtspsrc ntp-sync=true`, `buffer-mode=synced`, and mux `attach-sys-ts=0`
+- [x] Refuse unsafe fusion when pairwise observation skew exceeds the configured maximum (default 100 ms) and emit `mtmc_desync` through `log_event`
+- [x] Increment per-source generation on the existing `stream_reconnect` event and evict stale published mappings after TTL expiry
+- [x] Set mux `live-source=1` for RTSP and reduce `batched-push-timeout` from four seconds to approximately one frame interval so one stalled source cannot hold a batch for seconds
+- [x] Read global IDs from the in-process immutable map in downstream CSV/OSD probes; do not use Python `NvDsUserMeta`, `misc_obj_info`, or mutate `obj_meta.object_id`
+- [x] Dump the final authoritative assignment to `--mtmc-json` at shutdown so evaluation can backfill the expected online reassignment warm-up
+- [x] Keep periodic reassignment off the streaming thread on the live path by processing immutable state snapshots in a worker
 
 ### M3.8.7 — Optional Appearance via ReID SGIE
 

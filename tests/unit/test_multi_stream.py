@@ -1,6 +1,19 @@
+import json
 from pathlib import Path
 
-from pipelines.multi_stream import MultiStreamConfig, parse_args, _output_csv_path, _restream_port, _make_nvinfer_config
+from pipelines.multi_stream import (
+    MultiStreamConfig,
+    StreamReconnectDetector,
+    _make_nvinfer_config,
+    _output_csv_path,
+    _restream_port,
+    attach_mtmc_probe,
+    format_mtmc_osd_label,
+    mux_timing_properties,
+    parse_args,
+    prepare_mtmc,
+    rtsp_clock_properties,
+)
 
 
 def test_default_uris_is_empty_list():
@@ -86,6 +99,7 @@ def test_yolo_decode_probe_sets_untracked_object_id():
     # each detection to the frame so nvtracker assigns a fresh unique track ID
     # rather than treating every detection as already-tracked with ID=0.
     import inspect
+
     from pipelines.multi_stream import run
     src = inspect.getsource(run)
     assert "UNTRACKED_OBJECT_ID" in src
@@ -97,6 +111,7 @@ def test_yolo_decode_probe_marks_frame_inferred():
     # must set frame_meta.bInferDone = 1 itself. Without this the tracker
     # outputs zero objects and every tracker CSV is empty.
     import inspect
+
     from pipelines.multi_stream import run
     src = inspect.getsource(run)
     assert "bInferDone" in src
@@ -106,6 +121,7 @@ def test_yolo_decode_probe_sets_detector_bbox_info():
     # nvtracker associates on detector_bbox_info.org_bbox_coords, not
     # rect_params, so the probe must populate it or the tracker drops the object.
     import inspect
+
     from pipelines.multi_stream import run
     src = inspect.getsource(run)
     assert "detector_bbox_info" in src
@@ -159,26 +175,142 @@ def test_parse_args_no_sync():
     assert config.no_sync is True
 
 
+def test_parse_args_mtmc_online_options():
+    config = parse_args([
+        "--mtmc",
+        "--homography", "0=configs/homography_C1.json",
+        "--homography", "1=configs/homography_C2.json",
+        "--mtmc-z-gate", "2.5",
+        "--mtmc-min-affinity", "0.75",
+        "--mtmc-reassign-interval", "7",
+        "--mtmc-json", "results/mtmc.json",
+        "--mtmc-osd-labels",
+        "--mtmc-sync-bucket-ms", "40",
+        "--mtmc-max-skew-ms", "90",
+    ])
+
+    assert config.mtmc is True
+    assert config.homographies == [
+        "0=configs/homography_C1.json",
+        "1=configs/homography_C2.json",
+    ]
+    assert config.mtmc_z_gate == 2.5
+    assert config.mtmc_min_affinity == 0.75
+    assert config.mtmc_reassign_interval == 7
+    assert config.mtmc_json == "results/mtmc.json"
+    assert config.mtmc_osd_labels is True
+    assert config.mtmc_sync_bucket_ms == 40.0
+    assert config.mtmc_max_skew_ms == 90.0
+
+
+def test_rtsp_clock_and_mux_properties_use_ntp_and_one_frame_timeout():
+    assert rtsp_clock_properties() == {
+        "ntp-sync": True,
+        "buffer-mode": 4,
+    }
+    assert mux_timing_properties(["rtsp://camera/stream0", "rtsp://camera/stream1"]) == {
+        "live-source": 1,
+        "attach-sys-ts": 0,
+        "batched-push-timeout": 40_000,
+    }
+
+
+def test_reconnect_detector_ignores_initial_connect_and_requires_a_disconnect():
+    detector = StreamReconnectDetector()
+
+    assert detector.connected() is False
+    assert detector.connected() is False
+    detector.disconnected()
+    assert detector.connected() is True
+    assert detector.connected() is False
+
+
+def test_prepare_mtmc_validates_bindings_and_converts_cli_units(tmp_path):
+    bindings = []
+    for source_id in range(2):
+        path = tmp_path / f"h{source_id}.json"
+        path.write_text(json.dumps({
+            "source_id": source_id,
+            "camera": f"C{source_id + 1}",
+            "matrix": [[0.01, 0.0, 0.0], [0.0, 0.01, 0.0], [0.0, 0.0, 1.0]],
+            "image_width": 1920,
+            "image_height": 1080,
+        }))
+        bindings.append(f"{source_id}={path}")
+    config = MultiStreamConfig(
+        uris=["c1.mp4", "c2.mp4"],
+        mtmc=True,
+        homographies=bindings,
+        mtmc_z_gate=2.5,
+        mtmc_min_affinity=0.75,
+        mtmc_reassign_interval=7,
+        mtmc_sync_bucket_ms=40.0,
+        mtmc_max_skew_ms=90.0,
+    )
+
+    setup = prepare_mtmc(config)
+
+    assert set(setup.homographies) == {0, 1}
+    assert setup.config.z_gate == 2.5
+    assert setup.config.min_affinity == 0.75
+    assert setup.config.reassign_interval == 7
+    assert setup.config.sync_bucket_ns == 40_000_000
+    assert setup.config.max_skew_ns == 90_000_000
+
+
+def test_mtmc_osd_label_keeps_local_and_global_identity_visible():
+    assert format_mtmc_osd_label("person", object_id=17, global_id=41) == (
+        "person local=17 global=41"
+    )
+
+
+def test_mtmc_probe_attaches_to_tracker_source_before_demux():
+    calls = []
+
+    class Pad:
+        def add_probe(self, probe_type, callback, user_data):
+            calls.append((probe_type, callback, user_data))
+
+    class Element:
+        def get_static_pad(self, name):
+            assert name == "src"
+            return Pad()
+
+    class Pipeline:
+        def get_by_name(self, name):
+            assert name == "tracker"
+            return Element()
+
+    callback = object()
+    attach_mtmc_probe(Pipeline(), probe_type="BUFFER", callback=callback)
+
+    assert calls == [("BUFFER", callback, 0)]
+
+
 def test_run_imports_perf_monitor():
     import inspect
+
     from pipelines.multi_stream import run
     assert "perf_monitor" in inspect.getsource(run)
 
 
 def test_run_has_frame_counts():
     import inspect
+
     from pipelines.multi_stream import run
     assert "frame_counts" in inspect.getsource(run)
 
 
 def test_run_uses_timeout_add_seconds():
     import inspect
+
     from pipelines.multi_stream import run
     assert "timeout_add_seconds" in inspect.getsource(run)
 
 
 def test_build_pipeline_has_no_sync():
     import inspect
+
     from pipelines.multi_stream import build_pipeline
     assert "sync" in inspect.getsource(build_pipeline)
 
@@ -192,24 +324,28 @@ def test_module_calls_configure_pipeline_logging():
     # Called once at import time (not per-run) so logging is configured
     # before the module-level plugin-load log line fires.
     import inspect
-    import pipelines.multi_stream as multi_stream
+
+    from pipelines import multi_stream
     assert "configure_pipeline_logging()" in inspect.getsource(multi_stream)
 
 
 def test_run_emits_pipeline_start_event():
     import inspect
+
     from pipelines.multi_stream import run
     assert "pipeline_start" in inspect.getsource(run)
 
 
 def test_run_emits_pipeline_eos_event():
     import inspect
+
     from pipelines.multi_stream import run
     assert "pipeline_eos" in inspect.getsource(run)
 
 
 def test_run_emits_pipeline_error_event():
     import inspect
+
     from pipelines.multi_stream import run
     assert "pipeline_error" in inspect.getsource(run)
 
@@ -221,23 +357,27 @@ def test_run_emits_pipeline_error_event():
 
 def test_run_creates_health_monitor():
     import inspect
+
     from pipelines.multi_stream import run
     assert "HealthMonitor" in inspect.getsource(run)
 
 
 def test_run_records_health_frame_in_probe():
     import inspect
+
     from pipelines.multi_stream import run
     assert "record_frame" in inspect.getsource(run)
 
 
 def test_run_emits_health_tick_event():
     import inspect
+
     from pipelines.multi_stream import run
     assert "health_tick" in inspect.getsource(run)
 
 
 def test_run_warns_on_source_stalled():
     import inspect
+
     from pipelines.multi_stream import run
     assert "source_stalled" in inspect.getsource(run)
