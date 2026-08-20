@@ -24,7 +24,6 @@ from collections import defaultdict
 import motmetrics as mm
 import numpy as np
 
-
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
@@ -64,10 +63,12 @@ def load_gt(path: str, min_visibility: float = 0.0, class_ids: tuple = (1,)) -> 
     return rows
 
 
-def load_predictions(path: str) -> list[dict]:
+def load_predictions(path: str, *, id_field: str = "object_id") -> list[dict]:
     """Load pipeline CSV, converting 0-indexed frame_num to 1-indexed.
 
-    Drops rows with object_id=0 (untracked; should not appear after the
+    ``id_field`` selects the CSV identity column and defaults to the per-camera
+    tracker identity for backward compatibility. Drops rows whose selected ID
+    is 0 (untracked; should not appear after the
     UNTRACKED_OBJECT_ID fix but kept as a guard). Warns if >50% dropped.
     Returns list of {frame, obj_id, left, top, width, height}.
     """
@@ -76,7 +77,7 @@ def load_predictions(path: str) -> list[dict]:
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            obj_id = int(row["object_id"])
+            obj_id = int(row[id_field])
             if obj_id == 0:
                 dropped += 1
                 continue
@@ -91,7 +92,7 @@ def load_predictions(path: str) -> list[dict]:
     total = len(rows) + dropped
     if total > 0 and dropped / total > 0.5:
         warnings.warn(
-            f"load_predictions: {dropped}/{total} rows had object_id=0 and were dropped. "
+            f"load_predictions: {dropped}/{total} rows had {id_field}=0 and were dropped. "
             "Check that the UNTRACKED_OBJECT_ID fix is in the pipeline.",
             stacklevel=2,
         )
@@ -127,7 +128,7 @@ def build_accumulator(gt_rows: list[dict], pred_rows: list[dict],
     for r in pred_rows:
         pred_by_frame[r["frame"]].append(r)
 
-    all_frames = sorted(gt_by_frame.keys())
+    all_frames = sorted(set(gt_by_frame) | set(pred_by_frame))
     max_d = 1.0 - iou_threshold
 
     for frame in all_frames:

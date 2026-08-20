@@ -262,15 +262,15 @@
 
 ### M3.8.4 — Offline Fusion + MTMC Metrics
 
-- [ ] Make `metrics.evaluate_tracker.load_predictions()` accept an `id_field` while retaining `object_id` as the default
-- [ ] Add `metrics/evaluate_mtmc.py`; validate positional `--pred`, `--camera`, and `--homography` arguments have identical lengths and explicit camera/source binding
-- [ ] Implement `--fuse-offline` so geometry/association tuning can reuse tracker CSVs without rerunning the GPU pipeline or trusting an existing `global_id` column
-- [ ] Report the primary A/B: per-camera IDF1 using tracker `object_id` versus pooled image-plane IDF1 using shared `global_id`; state that pooled MOTA/MOTP remain detection-weighted camera aggregates
-- [ ] Treat `global_id == -1` as a per-track singleton rather than dropping it, so refusal to fuse is penalised
-- [ ] Report cross-camera identity precision/recall/F1 over detections matched to GT, plus mean cameras per global ID (GT reference: 2.78) and global-ID count (GT reference: 313)
-- [ ] Report ground-plane MODA/MODP at a 0.5 m gate with 1.0 m sensitivity, using a sigma-weighted mean for multi-view predictions
-- [ ] Add an optional `min_affinity × z_gate` sweep and persist its results in a W&B table/JSON artifact
-- [ ] Complete the CPU-only offline-fusion milestone before modifying the live pipeline
+- [x] Make `metrics.evaluate_tracker.load_predictions()` accept an `id_field` while retaining `object_id` as the default
+- [x] Add `metrics/evaluate_mtmc.py`; validate positional `--pred`, `--camera`, and `--homography` arguments have identical lengths and explicit camera/source binding
+- [x] Implement `--fuse-offline` so geometry/association tuning can reuse tracker CSVs without rerunning the GPU pipeline or trusting an existing `global_id` column
+- [x] Report the primary A/B: per-camera IDF1 using tracker `object_id` versus pooled image-plane IDF1 using shared `global_id`; state that pooled MOTA/MOTP remain detection-weighted camera aggregates
+- [x] Treat `global_id == -1` as a per-track singleton rather than dropping it, so refusal to fuse is penalised
+- [x] Report cross-camera identity precision/recall/F1 over detections matched to GT, plus mean cameras per global ID (GT reference: 2.78) and global-ID count (GT reference: 313)
+- [x] Report ground-plane MODA/MODP at a 0.5 m gate with 1.0 m sensitivity, using a sigma-weighted mean for multi-view predictions
+- [x] Add an optional `min_affinity × z_gate` sweep and persist its results in a W&B table/JSON artifact
+- [x] Complete the CPU-only offline-fusion milestone before modifying the live pipeline
 
 ### M3.8.5 — Detection + CSV Identity Contract
 
