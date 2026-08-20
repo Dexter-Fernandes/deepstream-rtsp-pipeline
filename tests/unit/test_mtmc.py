@@ -1,6 +1,12 @@
 import numpy as np
 
-from pipelines.mtmc import GroundObservation, MtmcConfig, MtmcFuser, fuse_offline
+from pipelines.mtmc import (
+    GroundObservation,
+    MtmcConfig,
+    MtmcFuser,
+    _candidate_cost,
+    fuse_offline,
+)
 
 
 def test_separated_people_keep_distinct_global_ids_across_cameras():
@@ -65,6 +71,18 @@ def test_observations_above_maximum_sigma_are_dropped():
     assert (1, 20) not in id_map
 
 
+def test_rejected_observation_does_not_leak_an_embedding_cache_entry():
+    fuser = MtmcFuser(MtmcConfig(max_sigma_m=1.5))
+
+    fuser.observe(
+        0,
+        0,
+        [GroundObservation(0, 0, 10, 0.0, 0.0, 1.51, np.array([1.0, 0.0]))],
+    )
+
+    assert fuser._embedding_cache == {}
+
+
 def test_cosine_appearance_cost_disambiguates_equal_geometry():
     observations = []
     for frame in range(2):
@@ -91,6 +109,58 @@ def test_cosine_appearance_cost_disambiguates_equal_geometry():
 
     assert id_map[(0, 10)] == id_map[(1, 21)]
     assert id_map[(0, 11)] == id_map[(1, 20)]
+
+
+def test_missing_appearance_is_neutral_instead_of_a_perfect_match():
+    config = MtmcConfig(w_app=0.5)
+    anchor = GroundObservation(0, 0, 10, 0.0, 0.0, 0.1, np.array([1.0, 0.0]))
+    matching = GroundObservation(0, 1, 20, 0.0, 0.0, 0.1, np.array([1.0, 0.0]))
+    missing = GroundObservation(0, 1, 21, 0.0, 0.0, 0.1)
+    opposite = GroundObservation(0, 1, 22, 0.0, 0.0, 0.1, np.array([-1.0, 0.0]))
+
+    matching_cost = _candidate_cost(anchor, matching, config)
+    missing_cost = _candidate_cost(anchor, missing, config)
+    opposite_cost = _candidate_cost(anchor, opposite, config)
+
+    assert matching_cost < missing_cost < opposite_cost
+
+
+def test_online_fuser_carries_sparse_embeddings_forward_per_tracklet():
+    fuser = MtmcFuser(
+        MtmcConfig(
+            sync_bucket_ns=100,
+            w_app=1.0,
+            min_cooccurrence=5,
+            min_support=5,
+            min_affinity=1.0,
+            reassign_interval=5,
+        ),
+        expected_sources={0, 1},
+    )
+    for frame in range(5):
+        timestamp_ns = frame * 100
+        embedding_a = np.array([1.0, 0.0]) if frame == 0 else None
+        embedding_b = np.array([0.0, 1.0]) if frame == 0 else None
+        fuser.observe(
+            timestamp_ns,
+            0,
+            [
+                GroundObservation(timestamp_ns, 0, 10, 0.0, 0.0, 0.1, embedding_a),
+                GroundObservation(timestamp_ns, 0, 11, 0.0, 0.0, 0.1, embedding_b),
+            ],
+        )
+        fuser.observe(
+            timestamp_ns,
+            1,
+            [
+                GroundObservation(timestamp_ns, 1, 20, 0.0, 0.0, 0.1, embedding_b),
+                GroundObservation(timestamp_ns, 1, 21, 0.0, 0.0, 0.1, embedding_a),
+            ],
+        )
+        fuser.flush_ready()
+
+    assert fuser.global_id(0, 10) == fuser.global_id(1, 21)
+    assert fuser.global_id(0, 11) == fuser.global_id(1, 20)
 
 
 def test_online_fuser_publishes_a_complete_bucket_assignment():

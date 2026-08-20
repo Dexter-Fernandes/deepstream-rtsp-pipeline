@@ -269,6 +269,7 @@ def project_person_detections(
     source_id: int,
     detections: Iterable[object],
     homography: Homography,
+    embeddings: Mapping[int, np.ndarray] | None = None,
 ) -> tuple[GroundObservation, ...]:
     """Project reliable tracked-person foot points into the ground plane."""
     observations = []
@@ -305,14 +306,19 @@ def project_person_detections(
             continue
         if not np.isfinite((x, y, sigma)).all() or sigma <= 0.0:
             continue
+        object_id = int(detection.object_id)
+        embedding = None
+        if embeddings is not None and object_id in embeddings:
+            embedding = np.asarray(embeddings[object_id], dtype=np.float32).copy()
         observations.append(
             GroundObservation(
                 timestamp_ns=int(timestamp_ns),
                 source_id=int(source_id),
-                object_id=int(detection.object_id),
+                object_id=object_id,
                 x=x,
                 y=y,
                 sigma=sigma,
+                embedding=embedding,
             )
         )
     return tuple(observations)

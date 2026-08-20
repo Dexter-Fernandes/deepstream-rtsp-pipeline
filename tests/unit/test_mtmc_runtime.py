@@ -91,6 +91,28 @@ def test_reliable_person_bbox_projects_to_ground_position_with_uncertainty():
     assert observation.sigma == 0.1
 
 
+def test_projected_observation_carries_the_matching_reid_embedding():
+    homography = Homography(
+        source_id=0,
+        camera="C1",
+        matrix=np.diag([0.01, 0.01, 1.0]),
+        image_width=1920,
+        image_height=1080,
+    )
+    detection = Detection(3, 17, 0, "person", 0.9, 100.0, 200.0, 20.0, 100.0)
+    embedding = np.array([0.6, 0.8], dtype=np.float32)
+
+    observations = project_person_detections(
+        timestamp_ns=1_500_000_000,
+        source_id=0,
+        detections=[detection],
+        homography=homography,
+        embeddings={17: embedding},
+    )
+
+    np.testing.assert_array_equal(observations[0].embedding, embedding)
+
+
 def test_unprojectable_bbox_is_skipped_without_losing_other_people():
     homography = Homography(
         source_id=0,

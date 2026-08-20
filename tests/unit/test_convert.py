@@ -1,7 +1,6 @@
 from pathlib import Path
 
-from models.convert import build_trtexec_cmd, engine_path, parse_args
-
+from models.convert import build_trtexec_cmd, convert, engine_path, parse_args
 
 # ---------------------------------------------------------------------------
 # parse_args
@@ -26,6 +25,25 @@ def test_parse_args_custom_output_dir(tmp_path):
     onnx = tmp_path / "yolo26n.onnx"
     args = parse_args([str(onnx), "--output-dir", str(tmp_path)])
     assert args.output_dir == tmp_path
+
+
+def test_parse_args_custom_input_name_and_shape(tmp_path):
+    onnx = tmp_path / "reidentification.onnx"
+
+    args = parse_args(
+        [
+            str(onnx),
+            "--input-name",
+            "input_1",
+            "--input-shape",
+            "3",
+            "256",
+            "128",
+        ]
+    )
+
+    assert args.input_name == "input_1"
+    assert args.input_shape == (3, 256, 128)
 
 
 # ---------------------------------------------------------------------------
@@ -124,3 +142,39 @@ def test_trtexec_cmd_shape_flags_use_input_name_and_batch(tmp_path):
     assert "--minShapes=images:1x3x640x640" in joined
     assert "--optShapes=images:3x3x640x640" in joined
     assert "--maxShapes=images:3x3x640x640" in joined
+
+
+def test_trtexec_cmd_supports_reid_crop_shape(tmp_path):
+    onnx = tmp_path / "reidentification.onnx"
+    out = tmp_path / "reidentification_fp16_b32.engine"
+
+    cmd = build_trtexec_cmd(
+        onnx,
+        out,
+        fp16=True,
+        max_batch=32,
+        input_name="input_1",
+        input_shape=(3, 256, 128),
+    )
+
+    joined = " ".join(cmd)
+    assert "--minShapes=input_1:1x3x256x128" in joined
+    assert "--optShapes=input_1:32x3x256x128" in joined
+    assert "--maxShapes=input_1:32x3x256x128" in joined
+
+
+def test_convert_forwards_reid_input_shape_to_trtexec(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr("models.convert.subprocess.run", lambda cmd, check: calls.append(cmd))
+    onnx = tmp_path / "reidentification.onnx"
+
+    convert(
+        onnx,
+        fp16=True,
+        output_dir=tmp_path,
+        max_batch=32,
+        input_name="input_1",
+        input_shape=(3, 256, 128),
+    )
+
+    assert "--optShapes=input_1:32x3x256x128" in calls[0]

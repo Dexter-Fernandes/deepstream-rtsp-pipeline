@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Convert YOLO26n ONNX to TensorRT engine")
+    parser = argparse.ArgumentParser(description="Convert an ONNX model to a TensorRT engine")
     parser.add_argument("onnx", type=Path, help="Input ONNX model path")
     parser.add_argument("--fp16", action="store_true", help="Build FP16 engine (default: FP32)")
     parser.add_argument(
@@ -34,7 +34,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="input_name",
         help="ONNX input tensor name used in shape flags (default: images)",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--input-shape",
+        type=int,
+        nargs=3,
+        default=(3, 640, 640),
+        metavar=("C", "H", "W"),
+        dest="input_shape",
+        help="Model input shape without batch (default: 3 640 640)",
+    )
+    args = parser.parse_args(argv)
+    args.input_shape = tuple(args.input_shape)
+    return args
 
 
 def engine_path(onnx_path: Path, fp16: bool, output_dir: Path, max_batch: int = 1) -> Path:
@@ -49,6 +60,7 @@ def build_trtexec_cmd(
     fp16: bool,
     max_batch: int = 1,
     input_name: str = "images",
+    input_shape: tuple[int, int, int] = (3, 640, 640),
 ) -> list[str]:
     cmd = [
         "trtexec",
@@ -58,12 +70,14 @@ def build_trtexec_cmd(
     if fp16:
         cmd.append("--fp16")
     if max_batch > 1:
+        channels, height, width = input_shape
+        shape = f"{channels}x{height}x{width}"
         # Dynamic-batch ONNX: shape profile so TRT builds a plan covering
-        # batch 1..max_batch at the fixed 640×640 network resolution.
+        # batch 1..max_batch at the model's fixed spatial resolution.
         cmd += [
-            f"--minShapes={input_name}:1x3x640x640",
-            f"--optShapes={input_name}:{max_batch}x3x640x640",
-            f"--maxShapes={input_name}:{max_batch}x3x640x640",
+            f"--minShapes={input_name}:1x{shape}",
+            f"--optShapes={input_name}:{max_batch}x{shape}",
+            f"--maxShapes={input_name}:{max_batch}x{shape}",
         ]
     return cmd
 
@@ -74,10 +88,11 @@ def convert(
     output_dir: Path = Path("models/engines"),
     max_batch: int = 1,
     input_name: str = "images",
+    input_shape: tuple[int, int, int] = (3, 640, 640),
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     out = engine_path(onnx_path, fp16, output_dir, max_batch)
-    cmd = build_trtexec_cmd(onnx_path, out, fp16, max_batch, input_name)
+    cmd = build_trtexec_cmd(onnx_path, out, fp16, max_batch, input_name, input_shape)
     subprocess.run(cmd, check=True)
     return out
 
@@ -90,5 +105,6 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         max_batch=args.max_batch,
         input_name=args.input_name,
+        input_shape=args.input_shape,
     )
     print(f"Engine saved to {result}")

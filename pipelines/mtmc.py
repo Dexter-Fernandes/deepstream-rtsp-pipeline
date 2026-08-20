@@ -86,6 +86,7 @@ class MtmcFuser:
         self._qualified_id_map: dict[TrackletKey, int] = {}
         self._generations: dict[int, int] = defaultdict(int)
         self._last_seen: dict[TrackletKey, int] = {}
+        self._embedding_cache: dict[TrackletKey, np.ndarray] = {}
         self._latest_processed_bucket: int | None = None
         self._processed_buckets = 0
         self._newest_timestamp_ns: int | None = None
@@ -102,18 +103,26 @@ class MtmcFuser:
         state.latest_timestamp_ns = max(timestamp_ns, state.latest_timestamp_ns)
         source_observations = state.by_source.setdefault(source_id, [])
         for detection in detections:
+            sigma = float(detection.sigma)
+            if not np.isfinite(sigma) or sigma <= 0.0 or sigma > self.config.max_sigma_m:
+                continue
+            generation = self._generations[source_id]
+            object_id = int(detection.object_id)
+            tracklet = (source_id, generation, object_id)
+            embedding = _normalise_embedding(getattr(detection, "embedding", None))
+            if embedding is not None:
+                self._embedding_cache[tracklet] = embedding
             observation = _QualifiedObservation(
                 timestamp_ns=timestamp_ns,
                 source_id=source_id,
-                generation=self._generations[source_id],
-                object_id=int(detection.object_id),
+                generation=generation,
+                object_id=object_id,
                 x=float(detection.x),
                 y=float(detection.y),
-                sigma=float(detection.sigma),
-                embedding=getattr(detection, "embedding", None),
+                sigma=sigma,
+                embedding=self._embedding_cache.get(tracklet),
             )
-            if observation.sigma <= self.config.max_sigma_m:
-                source_observations.append(observation)
+            source_observations.append(observation)
 
     def flush_ready(self, *, force: bool = False) -> list[int]:
         flushed: list[int] = []
@@ -179,6 +188,7 @@ class MtmcFuser:
         self._all_tracklets.difference_update(stale)
         for key in stale:
             del self._last_seen[key]
+            self._embedding_cache.pop(key, None)
         self._qualified_id_map = {
             key: global_id
             for key, global_id in self._qualified_id_map.items()
@@ -273,6 +283,17 @@ def _tracklet_key(observation: GroundObservation | _QualifiedObservation) -> Tra
     )
 
 
+def _normalise_embedding(value: object) -> np.ndarray | None:
+    if value is None:
+        return None
+    embedding = np.asarray(value, dtype=np.float32).reshape(-1).copy()
+    norm = float(np.linalg.norm(embedding))
+    if embedding.size == 0 or not np.isfinite(norm) or norm <= 0.0:
+        return None
+    embedding /= norm
+    return embedding
+
+
 def _candidate_cost(
     left: GroundObservation | _QualifiedObservation,
     right: GroundObservation | _QualifiedObservation,
@@ -282,12 +303,21 @@ def _candidate_cost(
     z = distance / sqrt(left.sigma**2 + right.sigma**2)
     if distance > config.max_distance_m or z > config.z_gate:
         return None
-    appearance_cost = 0.0
+    appearance_cost = 1.0  # neutral cosine distance when either feature is unavailable
     if config.w_app and left.embedding is not None and right.embedding is not None:
-        left_norm = float(np.linalg.norm(left.embedding))
-        right_norm = float(np.linalg.norm(right.embedding))
-        if left_norm > 0.0 and right_norm > 0.0:
-            cosine = float(np.dot(left.embedding, right.embedding) / (left_norm * right_norm))
+        left_embedding = np.asarray(left.embedding).reshape(-1)
+        right_embedding = np.asarray(right.embedding).reshape(-1)
+        left_norm = float(np.linalg.norm(left_embedding))
+        right_norm = float(np.linalg.norm(right_embedding))
+        if (
+            left_embedding.shape == right_embedding.shape
+            and np.isfinite((left_norm, right_norm)).all()
+            and left_norm > 0.0
+            and right_norm > 0.0
+        ):
+            cosine = float(
+                np.dot(left_embedding, right_embedding) / (left_norm * right_norm)
+            )
             appearance_cost = 1.0 - max(-1.0, min(1.0, cosine))
     return config.w_geo * z + config.w_app * appearance_cost
 

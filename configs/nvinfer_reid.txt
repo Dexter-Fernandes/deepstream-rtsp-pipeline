@@ -1,0 +1,34 @@
+[property]
+gpu-id=0
+onnx-file=/workspace/models/engines/resnet50_market1501_aicity156.onnx
+model-engine-file=/workspace/models/engines/resnet50_market1501_aicity156_fp16_b32.engine
+batch-size=32
+
+# NVIDIA TAO ReIdentificationNet preprocessing (RGB, 3x256x128).
+net-scale-factor=0.01735207
+offsets=123.675;116.280;103.530
+model-color-format=0
+infer-dims=3;256;128
+maintain-aspect-ratio=0
+
+# Secondary inference over primary person objects only.
+process-mode=2
+gie-unique-id=2
+operate-on-gie-id=1
+operate-on-class-ids=0
+network-mode=2
+# Classifier scheduling enables per-track reinference caching. Raw fc_pred
+# tensor metadata remains the authoritative output; classifier labels are not
+# consumed by the pipeline.
+network-type=1
+classifier-threshold=0.0
+classifier-async-mode=0
+output-blob-names=fc_pred
+output-tensor-meta=1
+
+# Appearance evidence is accumulated over a tracklet, so 2 Hz at a 30 fps
+# live input is enough.  SGIE object crops use the reinference scheduler;
+# generic interval applies only to full-frame/primary inference.
+secondary-reinfer-interval=14
+input-object-min-width=24
+input-object-min-height=48

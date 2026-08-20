@@ -292,11 +292,11 @@
 
 ### M3.8.7 — Optional Appearance via ReID SGIE
 
-- [ ] Add `configs/nvinfer_reid.txt` as a secondary inference configuration with tensor metadata enabled and small-object filtering
-- [ ] Verify a DeepStream 9.0 sample ReID model is available; register engine generation in `models/convert.py` / `docker/init_models.py` with the existing skip-with-warning behaviour, otherwise export a compact OSNet model
-- [ ] L2-normalise per-object embeddings in the MTMC probe and combine cosine appearance distance with geometric cost via `w_app`
-- [ ] Set an SGIE interval on the live path so sparse embeddings stay within GTX 1660 Ti compute headroom
-- [ ] Measure geometry-only (`w_app = 0`) against tuned appearance and retain the SGIE only if cross-camera metrics justify its cost
+- [x] Add `configs/nvinfer_reid.txt` as a secondary inference configuration with tensor metadata enabled and small-object filtering
+- [x] Verify a DeepStream 9.0 sample ReID model is available; register engine generation in `models/convert.py` / `docker/init_models.py` with the existing skip-with-warning behaviour, otherwise export a compact OSNet model
+- [x] L2-normalise per-object embeddings in the MTMC probe and combine cosine appearance distance with geometric cost via `w_app`
+- [x] Set an SGIE interval on the live path so sparse embeddings stay within GTX 1660 Ti compute headroom
+- [x] Measure geometry-only (`w_app = 0`) against tuned appearance and retain the SGIE only if cross-camera metrics justify its cost
 
 ### M3.8.8 — Report + End-to-End Verification
 

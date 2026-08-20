@@ -15,6 +15,7 @@ from pipelines.mtmc_runtime import (
     project_person_detections,
     with_global_ids,
 )
+from pipelines.reid import extract_frame_reid_embeddings
 from pipelines.structured_log import configure_pipeline_logging, get_pipeline_logger, log_event
 
 configure_pipeline_logging()
@@ -55,6 +56,9 @@ class MultiStreamConfig:
     mtmc_osd_labels: bool = False
     mtmc_sync_bucket_ms: float = 33.0
     mtmc_max_skew_ms: float = 100.0
+    mtmc_appearance: bool = False
+    reid_config: str = "configs/nvinfer_reid.txt"
+    mtmc_w_app: float = 0.5
 
 
 @dataclass
@@ -100,6 +104,8 @@ def prepare_mtmc(config: MultiStreamConfig) -> MtmcSetup:
         raise ValueError("--mtmc-sync-bucket-ms must be positive")
     if config.mtmc_max_skew_ms <= 0.0:
         raise ValueError("--mtmc-max-skew-ms must be positive")
+    if config.mtmc_w_app < 0.0:
+        raise ValueError("--mtmc-w-app cannot be negative")
 
     homographies = load_homography_bindings(
         config.homographies,
@@ -114,6 +120,7 @@ def prepare_mtmc(config: MultiStreamConfig) -> MtmcSetup:
             reassign_interval=config.mtmc_reassign_interval,
             sync_bucket_ns=round(config.mtmc_sync_bucket_ms * 1_000_000),
             max_skew_ns=round(config.mtmc_max_skew_ms * 1_000_000),
+            w_app=config.mtmc_w_app if config.mtmc_appearance else 0.0,
         ),
         homographies=homographies,
     )
@@ -162,6 +169,19 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
     parser.add_argument(
         "--mtmc-max-skew-ms", type=float, default=100.0, dest="mtmc_max_skew_ms"
     )
+    parser.add_argument(
+        "--mtmc-appearance",
+        action="store_true",
+        dest="mtmc_appearance",
+        help="Enable the optional ReID SGIE appearance cost",
+    )
+    parser.add_argument(
+        "--reid-config",
+        default="configs/nvinfer_reid.txt",
+        dest="reid_config",
+        help="DeepStream secondary ReID inference config",
+    )
+    parser.add_argument("--mtmc-w-app", type=float, default=0.5, dest="mtmc_w_app")
     args = parser.parse_args(argv)
     return MultiStreamConfig(
         uris=args.uris,
@@ -185,6 +205,9 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
         mtmc_osd_labels=args.mtmc_osd_labels,
         mtmc_sync_bucket_ms=args.mtmc_sync_bucket_ms,
         mtmc_max_skew_ms=args.mtmc_max_skew_ms,
+        mtmc_appearance=args.mtmc_appearance,
+        reid_config=args.reid_config,
+        mtmc_w_app=args.mtmc_w_app,
     )
 
 
@@ -254,10 +277,17 @@ def format_mtmc_osd_label(class_label: str, *, object_id: int, global_id: int) -
     return f"{class_label} local={object_id} global={global_id}"
 
 
-def attach_mtmc_probe(pipeline, *, probe_type, callback) -> None:
-    """Attach geometry-only MTMC at the tracker source, before stream demux."""
-    tracker_src = pipeline.get_by_name("tracker").get_static_pad("src")
-    tracker_src.add_probe(probe_type, callback, 0)
+def attach_mtmc_probe(
+    pipeline,
+    *,
+    probe_type,
+    callback,
+    appearance_enabled: bool = False,
+) -> None:
+    """Attach MTMC after its final shared inference element and before demux."""
+    element_name = "reid" if appearance_enabled else "tracker"
+    source_pad = pipeline.get_by_name(element_name).get_static_pad("src")
+    source_pad.add_probe(probe_type, callback, 0)
 
 
 def _make_file_source_bin(pipeline, config: MultiStreamConfig, idx: int):
@@ -417,14 +447,22 @@ def build_pipeline(
     mux = Gst.ElementFactory.make("nvstreammux", "mux")
     nvinfer = Gst.ElementFactory.make("nvinfer", "nvinfer")
     tracker = Gst.ElementFactory.make("nvtracker", "tracker")
+    reid = (
+        Gst.ElementFactory.make("nvinfer", "reid")
+        if config.mtmc and config.mtmc_appearance
+        else None
+    )
 
     # ── Demux: split batched stream back to per-source buffers ───────────────
     demux = Gst.ElementFactory.make("nvstreamdemux", "demux")
 
-    for name, el in [
+    shared_elements = [
         ("nvstreammux", mux), ("nvinfer", nvinfer), ("nvtracker", tracker),
         ("nvstreamdemux", demux),
-    ]:
+    ]
+    if reid is not None:
+        shared_elements.append(("nvinfer-reid", reid))
+    for name, el in shared_elements:
         if not el:
             raise RuntimeError(f"Could not create GStreamer element: {name}")
         pipeline.add(el)
@@ -442,6 +480,8 @@ def build_pipeline(
         "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so",
     )
     tracker.set_property("ll-config-file", config.tracker_config)
+    if reid is not None:
+        reid.set_property("config-file-path", config.reid_config)
 
     # ── Source bins → mux ────────────────────────────────────────────────────
     # Each bin is: rtspsrc → rtph264depay → nvv4l2decoder → queue
@@ -462,7 +502,11 @@ def build_pipeline(
     # are deliberately downstream of the demux (see below).
     mux.link(nvinfer)
     nvinfer.link(tracker)
-    tracker.link(demux)
+    if reid is None:
+        tracker.link(demux)
+    else:
+        tracker.link(reid)
+        reid.link(demux)
 
     # ── Per-source output branches ────────────────────────────────────────────
     # Each branch replicates the proven single-stream tail:
@@ -746,11 +790,20 @@ def run(config: MultiStreamConfig) -> None:
                         is_rtsp=not _is_file_uri(config.uris[source_id]),
                     )
                     detections = _parse_frame_detections(frame_meta)
+                    embeddings = (
+                        extract_frame_reid_embeddings(
+                            frame_meta,
+                            pyds_module=pyds,
+                        )
+                        if config.mtmc_appearance
+                        else None
+                    )
                     observations = project_person_detections(
                         timestamp_ns=timestamp_ns,
                         source_id=source_id,
                         detections=detections,
                         homography=mtmc_setup.homographies[source_id],
+                        embeddings=embeddings,
                     )
                 except (IndexError, KeyError, ValueError) as exc:
                     log_event(
@@ -773,6 +826,7 @@ def run(config: MultiStreamConfig) -> None:
             pipeline,
             probe_type=Gst.PadProbeType.BUFFER,
             callback=_mtmc_probe,
+            appearance_enabled=config.mtmc_appearance,
         )
 
     # One probe per per-branch nvdsosd sink pad — fires before that branch's OSD

@@ -203,6 +203,23 @@ def test_parse_args_mtmc_online_options():
     assert config.mtmc_max_skew_ms == 90.0
 
 
+def test_parse_args_enables_optional_reid_appearance():
+    config = parse_args(
+        [
+            "--mtmc",
+            "--mtmc-appearance",
+            "--reid-config",
+            "configs/custom_reid.txt",
+            "--mtmc-w-app",
+            "0.75",
+        ]
+    )
+
+    assert config.mtmc_appearance is True
+    assert config.reid_config == "configs/custom_reid.txt"
+    assert config.mtmc_w_app == 0.75
+
+
 def test_rtsp_clock_and_mux_properties_use_ntp_and_one_frame_timeout():
     assert rtsp_clock_properties() == {
         "ntp-sync": True,
@@ -246,6 +263,8 @@ def test_prepare_mtmc_validates_bindings_and_converts_cli_units(tmp_path):
         mtmc_reassign_interval=7,
         mtmc_sync_bucket_ms=40.0,
         mtmc_max_skew_ms=90.0,
+        mtmc_appearance=True,
+        mtmc_w_app=0.75,
     )
 
     setup = prepare_mtmc(config)
@@ -256,6 +275,7 @@ def test_prepare_mtmc_validates_bindings_and_converts_cli_units(tmp_path):
     assert setup.config.reassign_interval == 7
     assert setup.config.sync_bucket_ns == 40_000_000
     assert setup.config.max_skew_ns == 90_000_000
+    assert setup.config.w_app == 0.75
 
 
 def test_mtmc_osd_label_keeps_local_and_global_identity_visible():
@@ -285,6 +305,33 @@ def test_mtmc_probe_attaches_to_tracker_source_before_demux():
     attach_mtmc_probe(Pipeline(), probe_type="BUFFER", callback=callback)
 
     assert calls == [("BUFFER", callback, 0)]
+
+
+def test_mtmc_probe_attaches_to_reid_source_when_appearance_is_enabled():
+    requested_elements = []
+
+    class Pad:
+        def add_probe(self, probe_type, callback, user_data):
+            assert (probe_type, callback, user_data) == ("BUFFER", "callback", 0)
+
+    class Element:
+        def get_static_pad(self, name):
+            assert name == "src"
+            return Pad()
+
+    class Pipeline:
+        def get_by_name(self, name):
+            requested_elements.append(name)
+            return Element()
+
+    attach_mtmc_probe(
+        Pipeline(),
+        probe_type="BUFFER",
+        callback="callback",
+        appearance_enabled=True,
+    )
+
+    assert requested_elements == ["reid"]
 
 
 def test_run_imports_perf_monitor():
