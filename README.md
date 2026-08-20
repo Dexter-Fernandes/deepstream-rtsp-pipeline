@@ -68,7 +68,7 @@ ffplay rtsp://localhost:8556/stream0_out   # YOLO26n boxes on stream0
 ffplay rtsp://localhost:8557/stream1_out   # YOLO26n boxes on stream1
 ffplay rtsp://localhost:8558/stream2_out   # YOLO26n boxes on stream2
 
-# Tune detection confidence (default 0.25)
+# Tune detection confidence (default 0.18 — F1-optimal on WildTrack)
 # Add --conf-threshold 0.5 to the compose command: or run directly:
 # docker run ... ds-pipeline python3 pipelines/multi_stream.py --uri ... --conf-threshold 0.4
 ```

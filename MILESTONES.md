@@ -78,7 +78,7 @@
 - [x] Update `configs/nvinfer_primary.txt`: YOLO26n FP16 engine (`yolo26n_fp16_b3.engine`), 80 COCO classes, cluster-mode removed (NMS baked into model)
 - [x] YOLO26n re-exported with `dynamic=True`; engines rebuilt with `max_batch=3` (`--minShapes/--optShapes/--maxShapes`); supports batch 1–3 in a single engine file; 3 new convert tests (77 total)
 - [x] Confirm detections appear correctly on MOT17-04 stream (visual check ✓ — boxes on all three RTSP output streams)
-- [x] `--conf-threshold` CLI flag wired through `MultiStreamConfig` to `parse_yolo26_output()` (default 0.25)
+- [x] `--conf-threshold` CLI flag wired through `MultiStreamConfig` to `parse_yolo26_output()` (default 0.18)
 
 ### M2.3 — C++ Decode Plugin (Part 1) ✓
 - [x] Scaffold `plugins/yolo26_decode/` with `CMakeLists.txt` (SM 75 / GTX 1660 Ti target)

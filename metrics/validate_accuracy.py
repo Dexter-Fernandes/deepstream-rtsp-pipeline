@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+from tqdm import tqdm
 
 from models.output_parser import parse_yolo26_output
 
@@ -229,7 +230,7 @@ def run_inference(
     context.set_tensor_address(output_name, int(d_output))
 
     results = []
-    for bgr in frames:
+    for bgr in tqdm(frames, desc="TRT inference"):
         inp = preprocess_frame(bgr)
         cuda.memcpy_htod_async(d_input, inp.ravel(), stream)
         context.execute_async_v3(stream.handle)
@@ -247,7 +248,7 @@ def detect_all(
     *,
     is_decode_engine: bool = False,
     plugin_lib: Path | None = None,
-    conf_threshold: float = 0.25,
+    conf_threshold: float = 0.18,
 ) -> list[list[dict]]:
     """Run engine on BGR frames; return per-frame detection lists in {left,top,width,height} format."""
     raw_outputs = run_inference(engine_path, frames, plugin_lib=plugin_lib)
@@ -290,7 +291,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--plugin-lib", type=Path, default=None, dest="plugin_lib",
                    help="libyolo26_decode.so (required with --decode-engine)")
     p.add_argument("--n-frames", type=int, default=50, dest="n_frames")
-    p.add_argument("--conf-threshold", type=float, default=0.25, dest="conf_threshold")
+    p.add_argument("--conf-threshold", type=float, default=0.18, dest="conf_threshold")
     p.add_argument("--save-json", type=Path, default=None, dest="save_json")
     return p.parse_args(argv)
 

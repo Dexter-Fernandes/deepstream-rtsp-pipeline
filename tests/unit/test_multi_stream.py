@@ -115,6 +115,12 @@ def test_default_tracker_config():
     assert MultiStreamConfig().tracker_config == "configs/tracker_nvdcf.yml"
 
 
+def test_default_conf_threshold_is_sweep_optimum():
+    # 0.18 is the F1 peak from metrics/results/conf_threshold_sweep.json
+    assert MultiStreamConfig().conf_threshold == 0.18
+    assert parse_args([]).conf_threshold == 0.18
+
+
 def test_parse_args_tracker_flag():
     config = parse_args(["--tracker", "configs/tracker_nvdcf.yml"])
     assert config.tracker_config == "configs/tracker_nvdcf.yml"

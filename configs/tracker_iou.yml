@@ -3,7 +3,7 @@
 # Fastest, lowest VRAM. MOT17 baseline before appearance features.
 
 BaseConfig:
-  minDetectorConfidence: 0.25    # matches --conf-threshold default
+  minDetectorConfidence: 0.18    # matches --conf-threshold default
 
 TargetManagement:
   maxTargetsPerStream: 150       # pedestrian-heavy MOT17 scenes

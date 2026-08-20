@@ -44,7 +44,7 @@ class MultiStreamConfig:
     output_dir: str = "."
     restream_base_port: int | None = None
     anonymise: bool = False
-    conf_threshold: float = 0.25
+    conf_threshold: float = 0.18
     tracker_config: str = "configs/tracker_nvdcf.yml"
     perf_json: str | None = None
     perf_interval: float = 5.0
@@ -260,7 +260,7 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
     parser.add_argument("--output-dir", default=".", dest="output_dir", help="Directory for per-source CSV files")
     parser.add_argument("--restream-base-port", type=int, default=None, dest="restream_base_port", help="Base port for nvrtspoutsinkbin (stream0=base, stream1=base+1, ...)")
     parser.add_argument("--anonymise", action="store_true", dest="anonymise", help="Enable blur anonymisation")
-    parser.add_argument("--conf-threshold", type=float, default=0.25, dest="conf_threshold", help="Detection confidence threshold (default: 0.25)")
+    parser.add_argument("--conf-threshold", type=float, default=0.18, dest="conf_threshold", help="Detection confidence threshold (default: 0.18)")
     parser.add_argument(
         "--tracker",
         default="configs/tracker_nvdcf.yml",

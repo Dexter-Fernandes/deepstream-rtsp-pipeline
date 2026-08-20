@@ -4,7 +4,7 @@
 # featureImgSizeLevel: 2 balances accuracy vs VRAM on GTX 1660 Ti.
 
 BaseConfig:
-  minDetectorConfidence: 0.25    # matches --conf-threshold default
+  minDetectorConfidence: 0.18    # matches --conf-threshold default
 
 TargetManagement:
   enableBboxUnClipping: 1
