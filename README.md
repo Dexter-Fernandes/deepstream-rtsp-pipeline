@@ -10,7 +10,8 @@ NVIDIA DeepStream pipeline running three concurrent RTSP streams through GPU-acc
 - 221 CPU-safe unit tests written before implementation (red→green); no GPU required for the test suite
 - Gaussian blur applied to every detected bbox region before `nvdsosd` renders or any output leaves the pipeline
 - FP32 vs FP16 vs FP16+decode-plugin compared on latency, VRAM, engine size, and fleet OTA cost; batch sweep 1–100 against a 25 fps real-time budget with fleet-sizing projections (`metrics/decode_comparison.ipynb`)
-- Per-frame CSV sink; mediamtx-served MOT17 sequences as the RTSP source (MOT17-04 has ground truth for MOTA/HOTA/IDF1 tracker evaluation)
+- Per-frame CSV sink; mediamtx-served Wildtrack Cam1–3 (5-min 1080p60 clips, TCP RTSP) as the live source; MOT17-04 played via a file-source branch for GT-aligned MOTA/IDF1 tracker evaluation
+- Optional cross-camera MTMC identity fusion: uncertainty-aware ground-plane geometry, generation-qualified tracker IDs, an optional DeepStream ReID SGIE, and a final authoritative assignment map for evaluation
 - Structured JSON-line logging (`pipelines/structured_log.py`) with per-stream `source_id` on every record; per-sensor health monitor (`metrics/health_monitor.py`) tracks liveness, rolling FPS vs expected, and time-since-last-detection, emitting a `health_tick` log line and `WARNING source_stalled` alerts via a GLib periodic callback
 - NGC DeepStream 9.0 + pyds compiled from source; `docker compose up` handles model export and conversion on first run
 
@@ -20,9 +21,9 @@ NVIDIA DeepStream pipeline running three concurrent RTSP streams through GPU-acc
 
 ```
 mediamtx (RTSP server)
-  ├─ stream0 (MOT17-04)  ──┐
-  ├─ stream1 (MOT17-13)  ──┤
-  └─ stream2 (MOT17-02)  ──┘
+  ├─ stream0 (Wildtrack cam1)  ──┐
+  ├─ stream1 (Wildtrack cam2)  ──┤
+  └─ stream2 (Wildtrack cam3)  ──┘
 
 Per-source source bins (× 3):
   rtspsrc → rtph264depay → nvv4l2decoder → queue ──→ nvstreammux.sink_{i}
@@ -31,6 +32,8 @@ Shared inference chain (batched, N=3):
   nvstreammux → nvinfer (YOLO26n FP16 + yolo26_decode plugin, network-type=100, output-tensor-meta=1)
              ← [nvinfer SRC probe: reads xywh tensor → NvDsObjectMeta (80 COCO classes)]
              → nvtracker (NvMultiObjectTracker)
+             → optional nvinfer SGIE (ReIdentificationNet, sparse tensor metadata)
+             ← [MTMC probe: atomic mux batch → ground plane → immutable global-ID map]
              → nvstreamdemux
 
 Per-source output branches (× 3):
@@ -45,7 +48,7 @@ A single `nvdsosd` on the batched buffer only draws on source 0 — the per-bran
 
 ## Quick-start
 
-**Prerequisites:** NVIDIA driver ≥ 590.48, `nvidia-container-toolkit`, `mediamtx` on host, MOT17-04/13/02 clips as MP4 in `data/`.
+**Prerequisites:** NVIDIA driver ≥ 590.48, `nvidia-container-toolkit`, `mediamtx` on host, Wildtrack cam1/cam2/cam3 5-min clips as MP4 in `data/` (live streaming); MOT17-04 as MP4 in `data/` for GT-aligned tracker evaluation (`metrics/evaluate_tracker.py`).
 
 ```bash
 # Start RTSP source streams
@@ -65,10 +68,40 @@ ffplay rtsp://localhost:8556/stream0_out   # YOLO26n boxes on stream0
 ffplay rtsp://localhost:8557/stream1_out   # YOLO26n boxes on stream1
 ffplay rtsp://localhost:8558/stream2_out   # YOLO26n boxes on stream2
 
-# Tune detection confidence (default 0.25)
+# Tune detection confidence (default 0.18 — F1-optimal on WildTrack)
 # Add --conf-threshold 0.5 to the compose command: or run directly:
 # docker run ... ds-pipeline python3 pipelines/multi_stream.py --uri ... --conf-threshold 0.4
 ```
+
+### Cross-camera identity fusion
+
+MTMC is opt-in, so the existing per-camera tracker baseline is unchanged. The deterministic file-input path below writes frame-bound `global_id`, reconnect `generation`, accepted batch identity, and acceptance status to each CSV, plus a whole-run authoritative map to `mtmc.json`. Legacy CSVs default to generation 0 and use aligned `frame_num` as their accepted batch identity:
+
+```bash
+mkdir -p /tmp/mtmc-run
+docker compose run --rm -v /tmp/mtmc-run:/tmp/mtmc-run pipeline \
+  python3 pipelines/multi_stream.py \
+  --uri file:///workspace/data/wildtrack_c1_gt.mp4 \
+  --uri file:///workspace/data/wildtrack_c2_gt.mp4 \
+  --uri file:///workspace/data/wildtrack_c3_gt.mp4 \
+  --output-dir /tmp/mtmc-run --no-sync --mtmc \
+  --homography 0=configs/homography_C1.json \
+  --homography 1=configs/homography_C2.json \
+  --homography 2=configs/homography_C3.json \
+  --mtmc-min-affinity 0.3 --mtmc-json /tmp/mtmc-run/mtmc.json
+
+.venv/bin/python -m metrics.evaluate_mtmc \
+  --wildtrack-root /path/to/WildTrack/labelled_ds \
+  --pred /tmp/mtmc-run/output_stream{0,1,2}.csv \
+  --camera 0=C1 1=C2 2=C3 \
+  --homography 0=configs/homography_C1.json \
+               1=configs/homography_C2.json \
+               2=configs/homography_C3.json \
+  --fuse-offline --final-map /tmp/mtmc-run/mtmc.json \
+  --min-affinity 0.3
+```
+
+Add `--mtmc-appearance` to enable the sparse ReID SGIE. The bundled model is provisioned on demand; if it is unavailable, startup explicitly falls back to geometry-only fusion. For RTSP, DeepStream derives `NvDsFrameMeta.ntp_timestamp` from RTCP sender reports. Fusion waits until every source clock is ready, treats each complete mux batch atomically, and refuses incomplete batches or timestamp skew above the default 100 ms gate.
 
 ---
 
@@ -76,17 +109,17 @@ ffplay rtsp://localhost:8558/stream2_out   # YOLO26n boxes on stream2
 
 ```bash
 pip install pytest
-pytest tests/unit/ -v      # 221 tests, CPU-only, no GPU required
+pytest tests/unit/ -v      # 378 tests, CPU-only, no GPU required
 ```
 
 | Module | Tests | What they cover |
 |--------|-------|-----------------|
-| `metadata_parser` | 6 | `Detection` dataclass, `parse_frame_meta` with fake pyds structs |
-| `csv_sink` | 6 | Header, field values, flush-on-write, multi-detection roundtrip |
+| `metadata_parser` | 8 | `Detection` dataclass, identity defaults, source propagation, and fake pyds structs |
+| `csv_sink` | 8 | Header, field values, identity generations, flush-on-write, and multi-detection roundtrip |
 | `anonymisation` | 6 | Blur applied, pixels outside bbox unchanged, out-of-bounds clip |
 | `frame_accessor` | 4 | NVMM surface accessor with injectable `_get_surface` |
 | `rtsp_pipeline` | 17 | Config defaults, arg parsing, source props, restream URI parsing |
-| `multi_stream` | 38 | Multi-URI parsing, CSV path routing, port offset, `_make_nvinfer_config`; tracker flag; `bInferDone` / `detector_bbox_info` / file-URI regression tests; perf flag defaults + wiring; M3.6 structured-log + health-monitor wiring assertions |
+| `multi_stream` | 50 | Multi-URI parsing, CSV path routing, tracker/perf flags, file and RTSP clocks, RTCP clock acquisition/loss/recovery, frame-bound receipt handoff, ReID placement, reconnects, and OSD labels |
 | `convert` | 14 | `engine_path` naming, `build_trtexec_cmd` flags, dynamic-batch shape profile, `parse_args` |
 | `export_yolo26` | 3 | `parse_args` for weights path and output-dir |
 | `init_models` | 9 | Skip/run logic for all cold-start and warm-start combinations; decode-engine skip/build paths |
@@ -99,6 +132,9 @@ pytest tests/unit/ -v      # 221 tests, CPU-only, no GPU required
 | `model_gate` | 19 | `match_rate ≥ 0.95` AND `mean_iou ≥ 0.95` gate checks, signed manifest (SHA-256 + timestamp), exit 0/1 for CI |
 | `structured_log` | 8 | JSON formatter, required fields (`ts`/`logger`/`level`/`event`), optional `source_id`, arbitrary extra fields, idempotent `configure_pipeline_logging` |
 | `health_monitor` | 12 | Per-source liveness window, `is_live` flag, rolling FPS, `fps_vs_expected` ratio, `time_since_last_detection_s`, system dict, never-seen-source defaults |
+| WildTrack / ground plane / homography | 36 | GT identity loading, frame-aligned clip validation, foot-point reliability and uncertainty, projection Jacobians, held-out homography fitting, and calibration quality gates |
+| MTMC / runtime / evaluator | 81 | Synchronised association, constrained clustering, reconnect generations, frame-bound runtime/CSV receipts, TTL/liveness eviction, authoritative history, rejected-evidence filtering, batch-parity agreement, and image/cross-camera/ground metrics |
+| ReID | 13 | Tensor-contract validation, L2-normalised embedding extraction, SGIE configuration, sparse feature caching, and geometry-only fallback |
 
 GPU smoke tests: `pytest --gpu` (`tests/smoke/` — requires GPU runner; auto-skipped in CI).
 
@@ -165,6 +201,18 @@ Full-graph overhead vs the bare TRT kernel is **7 %** (131 vs 140.9 fps/stream) 
 - **IOU** is the fastest and cheapest baseline. No motion or appearance model; identities churn when boxes stop overlapping frame-to-frame.
 - Low absolute MOTA (~0.10–0.14) is expected: YOLO26n-nano recovers only ~11k of 47,557 GT boxes, so MOTA is dominated by missed detections (recall), not tracker quality. The relative ranking is meaningful — all trackers see the same detection stream.
 
+**Cross-camera identity fusion (M3.8)** — measured on the three 401-frame, GT-aligned WildTrack clips. The tracker and detector remain per-camera; only the identity layer changes.
+
+| Identity mode | Pooled IDF1 ↑ | Cross-camera P / R / F1 ↑ | Ground MODA / MODP @ 0.5 m ↑ | FPS / source | Peak VRAM |
+|---|---:|---:|---:|---:|---:|
+| Per-camera IDs (no MTMC) | 0.197702 | 0 / 0 / 0 | -0.320235 / 0.556104 | 56.59 | 951 MB |
+| Geometry MTMC, `min_affinity=0.3` | **0.244635** | **0.669591 / 0.281068 / 0.395937** | **-0.245535 / 0.557548** | **52.48** | **945 MB** |
+| Geometry + sparse ReID, `w_app=0.5` | 0.241628 | 0.651049 / 0.286550 / **0.397948** | -0.254465 / 0.554020 | 37.79 | 1,085 MB |
+
+Geometry is the selected default. Sparse ReID improves cross-camera F1 by only 0.002011 absolute while lowering pooled IDF1 and ground-plane scores, reducing throughput by 28%, and adding 140 MB peak VRAM. The optional path remains available for camera networks where appearance is more discriminative. The geometry online shutdown map agrees with offline fusion on **10,608 / 10,608 post-warm-up rows (100%)** after a one-to-one ID permutation.
+
+The live RTSP path completed a 300-second, three-source appearance soak at 29.80 FPS/source and 1,173 MB peak VRAM. Accepted association batches had zero missing-source desyncs and zero skew refusals. DeepStream emitted eight isolated invalid-NTP mux attempts; each was rejected before fusion and recovered within 31.7 ms. A qualitative live ID (`1751`) was written across all three camera CSVs for 1,679 rows over a 28.0-second span. The exact commands, hashes, clock transitions, bounded-state proof, and cleanup audit are recorded in the M3.8 comparison artifact.
+
 ---
 
 ## Roadmap
@@ -182,6 +230,7 @@ YOLO26n FP16 runs end-to-end through DeepStream with a C++ TRT decode plugin. Th
 - ✓ **M3.3** — Live end-to-end FPS (131 fps unthrottled / 29.7 fps live) + 30-min stability run; `metrics/perf_monitor.py` (21 CPU-safe tests); `--perf-json / --duration / --no-sync` flags; `metrics/stability.ipynb`
 - ✓ **M3.4** — GPU smoke tests (`tests/smoke/`); motmetrics integration test; GitHub Actions unit-test workflow; model-promotion gate (`metrics/model_gate.py`, 19 CPU-safe tests) with SHA-256 signed manifest and CI exit 0/1
 - ✓ **M3.5** — `docs/jetson-upgrade.md`, `docs/isp-and-camera-input.md`, `docs/system-design.md`; README completeness pass
+- ✓ **M3.8** — WildTrack calibration and GT-aligned clips; CPU MTMC core and evaluator; online atomic mux-batch fusion; optional sparse ReID; 100% online/offline final-map agreement; 300-second RTSP soak; `metrics/mtmc_comparison.ipynb`
 - *(in progress)* **M3.6** — Observability / reactive debugging:
   - ✓ Structured JSON logging (`pipelines/structured_log.py`) — `configure_pipeline_logging` / `get_pipeline_logger` / `log_event`; all pipeline `print()` calls replaced with levelled JSON-line records (DEBUG/INFO/WARNING/ERROR) to stderr; 8 CPU-safe tests
   - ✓ Per-sensor health metrics (`metrics/health_monitor.py`) — per-source liveness (configurable window), rolling FPS vs expected, time-since-last-detection; `_health_tick` GLib callback emits a `health_tick` JSON line every interval and a `WARNING source_stalled` for any dead stream; 12 CPU-safe tests
@@ -204,7 +253,11 @@ YOLO26n FP16 runs end-to-end through DeepStream with a C++ TRT decode plugin. Th
 
 **`nvbuf-memory-type=3` on `nvvideoconvert`.** Default NVMM is device-only; `pyds.get_nvds_buf_surface` from a Python probe segfaults. CUDA unified memory (`type=3`) keeps the `NvBufSurface` CPU-accessible without an explicit `cudaMemcpy`.
 
-**mediamtx over real IP cameras.** Provides a reproducible, loopable, committable source. MOT17-04 has free ground truth annotations enabling quantitative tracker evaluation in M3.
+**mediamtx over real IP cameras.** Provides a reproducible, loopable, committable source. Wildtrack Cam1–3 give realistic sustained multi-stream RTSP load for the live pipeline; Wildtrack does have per-frame pedestrian GT (JSON, sampled every 5th frame), but `metrics/evaluate_tracker.py` currently only parses MOT17's dense per-frame CSV layout, so MOT17-04 is used separately (via a file-source branch, bypassing RTSP) for quantitative tracker evaluation in M3.2.
+
+**Global identity above `nvtracker`, not inside it.** `nvtracker` remains the per-camera motion/appearance tracker and its `object_id` is never overwritten. The MTMC layer qualifies that local ID with source and reconnect generation, projects reliable person foot points through per-camera homographies, and associates only complete mux batches whose true source timestamps pass the skew gate. Its published map is immutable and TTL-bounded for the live path; compact whole-run support/co-occurrence statistics produce the authoritative shutdown map without retaining every historical detection.
+
+**Appearance is optional and sparse.** The bundled ReIdentificationNet SGIE runs in classifier scheduling mode with tensor metadata enabled and a reinference interval of 14. The MTMC core caches the last valid L2-normalised embedding per generation-qualified tracklet. Missing embeddings are neutral rather than falsely treated as a perfect match, and model-provisioning failure explicitly selects geometry-only fusion.
 
 ---
 
@@ -217,6 +270,9 @@ YOLO26n FP16 runs end-to-end through DeepStream with a C++ TRT decode plugin. Th
 | GPU smoke tests | Require GPU runner; written last to avoid slow CI | Planned M3.4 via `pytest --gpu` and `tests/smoke/` |
 | Decode plugin shows little gain on YOLO26n | YOLO26n is NMS-free (300 pre-decoded boxes), so the kernel does ~0.006 ms of work; the accuracy comparison is between two separately-compiled TRT graphs, not a controlled kernel isolation | M2.6: YOLOv8n plugin (8,400 candidates + DFL + NMS) demonstrates where the pattern pays off |
 | DeepSORT tracker | Re-ID model exceeds 6 GB VRAM ceiling | Documented in M3 tracker comparison rationale; ByteTrack recommended instead |
+| RTSP NTP discontinuities | DeepStream can emit an isolated zero-NTP frame after clock acquisition | Fusion fails closed, advances liveness without evidence, rate-limits the transition, and resumes only after a valid timestamp |
+| Whole-run MTMC history | The authoritative final map needs compact support/co-occurrence statistics that grow with unique tracklets | Live observations and published IDs remain TTL-bounded; rotate or finalise very long capture sessions |
+| MTMC worker overload | The worker queue is unbounded; the measured 52.48 fps/source file run and 29.80 fps/source soak showed headroom and no accumulation, but higher-rate inputs are not admission-controlled | Add queue-depth telemetry, then reserve capacity before the submission lock and emit rejected frame receipts on saturation |
 
 ---
 

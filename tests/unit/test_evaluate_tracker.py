@@ -1,15 +1,15 @@
 import json
+
 import pytest
 
 from metrics.evaluate_tracker import (
-    load_gt,
-    load_predictions,
     build_accumulator,
     compute_mot_metrics,
     count_unique_tracks,
+    load_gt,
+    load_predictions,
     main,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -116,6 +116,45 @@ def test_load_predictions_multiple_frames(tmp_path):
     assert len(rows) == 3
     frames = {r["frame"] for r in rows}
     assert frames == {1, 2}
+
+
+def test_load_predictions_can_select_global_identity_column(tmp_path):
+    path = tmp_path / "pred_global.csv"
+    path.write_text(
+        "frame_num,object_id,global_id,left,top,width,height\n"
+        "0,41,-1,10,20,30,40\n"
+    )
+
+    rows = load_predictions(str(path), id_field="global_id")
+
+    assert rows[0]["obj_id"] == -1
+
+
+def test_build_accumulator_counts_predictions_on_frames_without_ground_truth():
+    gt_rows = [
+        {
+            "frame": 1,
+            "obj_id": 1,
+            "left": 0.0,
+            "top": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        }
+    ]
+    pred_rows = [
+        {
+            "frame": 2,
+            "obj_id": 2,
+            "left": 0.0,
+            "top": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        }
+    ]
+
+    metrics = compute_mot_metrics(build_accumulator(gt_rows, pred_rows))
+
+    assert metrics["MOTA"] == pytest.approx(-1.0)
 
 
 # ---------------------------------------------------------------------------

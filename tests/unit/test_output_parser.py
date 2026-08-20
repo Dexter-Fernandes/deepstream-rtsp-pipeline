@@ -50,6 +50,16 @@ def test_class_id_extraction():
     assert isinstance(det["class_id"], int)
 
 
+def test_default_threshold_is_sweep_optimum():
+    # Default matches the F1 peak of the WildTrack conf_threshold sweep (0.18)
+    tensor = _make_tensor([
+        [0, 0, 10, 10, 0.20, 0],
+        [0, 0, 10, 10, 0.16, 1],
+    ])
+    results = parse_yolo26_output(tensor)
+    assert [d["class_id"] for d in results] == [0]
+
+
 def test_batch_dim_squeezed():
     # Shape [1, 300, 6] should be handled identically to [300, 6]
     flat = _make_tensor([[10, 20, 50, 80, 0.9, 0]])

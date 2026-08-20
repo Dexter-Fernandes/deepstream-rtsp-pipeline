@@ -3,7 +3,7 @@ import numpy as np
 
 def parse_yolo26_output(
     tensor: np.ndarray,
-    conf_threshold: float = 0.25,
+    conf_threshold: float = 0.18,
 ) -> list[dict]:
     """
     Decode YOLO26n output tensor into detection dicts.

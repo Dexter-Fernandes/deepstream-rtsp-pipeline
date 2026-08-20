@@ -4,17 +4,26 @@ exec the pipeline command. Steps are skipped if output files already exist
 so repeated container starts are instant.
 """
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.request import urlopen
 
-from models.export_yolo26 import export as _export
 from models.convert import convert as _convert
 from models.convert import engine_path as _engine_path
 from models.decode_engine import decode_engine_path as _decode_path
+from models.export_yolo26 import export as _export
 
 _DEFAULT_PLUGIN_LIB = Path("/opt/ds_plugins/libyolo26_decode.so")
 _BUILD_ENGINE_BIN   = Path("/opt/ds_plugins/build_yolo26_engine")
+_DEFAULT_REID_CONFIG = Path("configs/nvinfer_reid.txt")
+_REID_MODEL_NAME = "resnet50_market1501_aicity156.onnx"
+_REID_MODEL_URL = (
+    "https://api.ngc.nvidia.com/v2/models/nvidia/tao/"
+    "reidentificationnet/versions/deployable_v1.2/files/"
+    f"{_REID_MODEL_NAME}"
+)
 
 
 def _build_decode_default(onnx, plugin_lib, fp16, max_batch, output_dir):
@@ -24,6 +33,93 @@ def _build_decode_default(onnx, plugin_lib, fp16, max_batch, output_dir):
         cmd.append("--fp16")
     cmd += ["--max-batch", str(max_batch)]
     subprocess.run(cmd, check=True)
+
+
+def _download_file(url: str, destination: Path) -> None:
+    """Download one model artifact atomically so an interrupted fetch is never reused."""
+    partial = destination.with_suffix(f"{destination.suffix}.part")
+    with urlopen(url, timeout=30) as response, partial.open("wb") as output:
+        shutil.copyfileobj(response, output)
+    partial.replace(destination)
+
+
+def ensure_reid_model(
+    engines_dir: Path,
+    *,
+    max_batch: int = 32,
+    model_url: str = _REID_MODEL_URL,
+    download_fn=_download_file,
+    convert_fn=_convert,
+) -> Path | None:
+    """Download NVIDIA's supported ReID ONNX and build its FP16 SGIE engine."""
+    engines_dir.mkdir(parents=True, exist_ok=True)
+    onnx = engines_dir / _REID_MODEL_NAME
+    engine = _engine_path(onnx, fp16=True, output_dir=engines_dir, max_batch=max_batch)
+
+    if onnx.exists():
+        print(f"[init] ReID ONNX found at {onnx} — skipping download", flush=True)
+    else:
+        print(f"[init] Downloading NVIDIA ReIdentificationNet → {onnx}...", flush=True)
+        try:
+            download_fn(model_url, onnx)
+        except OSError as exc:
+            print(
+                "[init] ReID download unavailable — skipping optional appearance model: "
+                f"{exc}",
+                flush=True,
+            )
+            return None
+
+    if engine.exists():
+        print(f"[init] ReID engine found at {engine} — skipping build", flush=True)
+        return engine
+
+    print(f"[init] Building ReID FP16 engine (max_batch={max_batch}) from {onnx}...", flush=True)
+    return convert_fn(
+        onnx,
+        fp16=True,
+        output_dir=engines_dir,
+        max_batch=max_batch,
+        input_name="input",
+        input_shape=(3, 256, 128),
+    )
+
+
+def should_prepare_reid(argv: list[str]) -> bool:
+    """Keep the optional model off the baseline container startup path."""
+    return "--mtmc" in argv and "--mtmc-appearance" in argv
+
+
+def _reid_config_path(argv: list[str]) -> Path:
+    for index, argument in enumerate(argv):
+        if argument == "--reid-config" and index + 1 < len(argv):
+            return Path(argv[index + 1])
+        if argument.startswith("--reid-config="):
+            return Path(argument.split("=", 1)[1])
+    return _DEFAULT_REID_CONFIG
+
+
+def prepare_launch_args(
+    argv: list[str],
+    *,
+    engines_dir: Path,
+    ensure_reid_fn=ensure_reid_model,
+) -> list[str]:
+    """Prepare optional appearance assets or make the geometry fallback explicit."""
+    launch_args = list(argv)
+    if not should_prepare_reid(launch_args):
+        return launch_args
+    if _reid_config_path(launch_args).resolve() != _DEFAULT_REID_CONFIG.resolve():
+        return launch_args
+    if ensure_reid_fn(engines_dir) is not None:
+        return launch_args
+
+    print(
+        "[init] ReID unavailable — continuing with geometry-only MTMC",
+        flush=True,
+    )
+    launch_args.remove("--mtmc-appearance")
+    return launch_args
 
 
 def ensure_models(
@@ -85,6 +181,10 @@ if __name__ == "__main__":
         engines_dir=Path("models/engines"),
         max_batch=3,
     )
+    launch_args = prepare_launch_args(
+        sys.argv[1:],
+        engines_dir=Path("models/engines"),
+    )
     print("[init] All models ready. Launching pipeline...", flush=True)
-    if sys.argv[1:]:
-        os.execvp(sys.argv[1], sys.argv[1:])
+    if launch_args:
+        os.execvp(launch_args[0], launch_args)

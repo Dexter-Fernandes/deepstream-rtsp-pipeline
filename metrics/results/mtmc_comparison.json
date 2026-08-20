@@ -1,0 +1,780 @@
+{
+  "schema_version": 4,
+  "artifact": "m3.8.8_mtmc_comparison",
+  "generated_on": "2026-08-20",
+  "status": "passed_geometry_default_appearance_optional_rtsp_verified",
+  "dataset": {
+    "name": "WildTrack labelled_ds",
+    "camera_bindings": {
+      "0": "C1",
+      "1": "C2",
+      "2": "C3"
+    },
+    "gt_aligned_clip_frames_per_camera": 401,
+    "processed_frames_per_file_run": 1203,
+    "file_timestamp_interval_ns": 500000000,
+    "tracker": "NvDCF",
+    "detector_confidence_threshold": 0.18,
+    "evaluation_filter": "class_id == 0 (person); tracker object_id 0 is valid and retained"
+  },
+  "recommendation": {
+    "default_mode": "geometry",
+    "appearance_mode": "optional_not_selected",
+    "runtime_config": {
+      "z_gate": 3.0,
+      "min_affinity": 0.3,
+      "w_geo": 1.0,
+      "w_app": 0.0
+    },
+    "reason": "Select geometry as the default. Appearance improves cross-camera F1 by only 0.002011 absolute, while pooled IDF1 and both ground-plane gates are worse; it also runs at 37.79 versus 52.48 fps/source and uses 140 MB more peak VRAM.",
+    "geometry_online_offline_gate": "Passed: strict one-to-one agreement is 10,608/10,608 evaluated post-warm-up rows (100%).",
+    "rtsp_gate": "Passed: the 300 s three-source soak kept every source live, accepted 8,638 synchronized association buckets with zero missing-source, skew, or desynchronization events, and shut down cleanly."
+  },
+  "configurations": {
+    "selected_geometry": {
+      "z_gate": 3.0,
+      "max_distance_m": 2.0,
+      "max_sigma_m": 1.5,
+      "w_geo": 1.0,
+      "w_app": 0.0,
+      "min_cooccurrence": 5,
+      "min_support": 3,
+      "min_affinity": 0.3,
+      "reassign_interval": 10,
+      "tracklet_ttl": 60,
+      "sync_bucket_ns": 33000000,
+      "max_skew_ns": 100000000
+    },
+    "final_appearance_runtime": {
+      "z_gate": 3.0,
+      "min_affinity": 0.3,
+      "w_geo": 1.0,
+      "w_app": 0.5,
+      "appearance_enabled_by": "--mtmc-appearance",
+      "secondary_reinfer_interval": 14,
+      "reid_config": "configs/nvinfer_reid.txt",
+      "reid_model": "NVIDIA TAO ReIdentificationNet resnet50_market1501_aicity156",
+      "selected_as_default": false,
+      "evaluator_config_note": "The evaluation JSON reports the evaluator defaults w_app=0 and w_geo=1. Those fields are not authoritative for this precomputed online final map; the runtime enabled appearance and used w_app=0.5."
+    },
+    "rtsp_soak": {
+      "appearance_enabled": true,
+      "c3_input_timestamp_offset_s": 0.233,
+      "duration_requested_s": 300,
+      "homographies": [
+        "configs/homography_C1.json",
+        "configs/homography_C2.json",
+        "configs/homography_C3.json"
+      ],
+      "input_rate_matching": "FFmpeg -re -itsscale 2; every frame preserved and PTS doubled to match the plan ~30fps live cadence",
+      "max_skew_ms": 100,
+      "min_affinity": 0.3,
+      "source_count": 3,
+      "source_frame_rate": "30000/1001",
+      "sync_bucket_ms": 33
+    }
+  },
+  "runs": {
+    "person_only_no_mtmc_baseline": {
+      "artifact_dir": "/tmp/mtmc-baseline-PL8IOn",
+      "evaluation_file": "evaluation-person-only.json",
+      "metrics": {
+        "per_camera_IDF1": {
+          "0": 0.314335,
+          "1": 0.304593,
+          "2": 0.268222
+        },
+        "pooled_IDF1": 0.197702,
+        "xcam": {
+          "xcam_tp": 0,
+          "xcam_fp": 0,
+          "xcam_fn": 3256,
+          "xcam_precision": 0.0,
+          "xcam_recall": 0.0,
+          "xcam_f1": 0.0,
+          "mean_cameras_per_global_id": 1.0,
+          "n_global_ids": 758
+        },
+        "ground_plane": {
+          "0.5m": {
+            "tp": 5418,
+            "fp": 8466,
+            "fn": 4100,
+            "precision": 0.3902333621434745,
+            "recall": 0.569237234713175,
+            "MODA": -0.3202353435595713,
+            "MODP": 0.5561036725678282,
+            "mean_distance_m": 0.22194816371608586,
+            "ground_IDF1": 0.251859,
+            "ground_MOTA": -0.481299
+          },
+          "1m": {
+            "tp": 6527,
+            "fp": 7357,
+            "fn": 2991,
+            "precision": 0.4701094785364448,
+            "recall": 0.6857533095188064,
+            "MODA": -0.08720319394830844,
+            "MODP": 0.6865323436964376,
+            "mean_distance_m": 0.31346765630356244,
+            "ground_IDF1": 0.31023,
+            "ground_MOTA": -0.277789
+          }
+        }
+      },
+      "performance": {
+        "duration_s": 7.086595296859741,
+        "total_frames": 1203,
+        "mean_fps_per_source": 56.58570628094055,
+        "fps_total": 169.75711884282165,
+        "peak_vram_mb": 951.0,
+        "mean_vram_mb": 885.75,
+        "rss_start_mb": 1118.8125,
+        "rss_end_mb": 1003.11328125,
+        "rss_delta_mb": -115.69921875,
+        "rss_slope_mb_per_min": -1049.9270105392648,
+        "leak_suspected": false,
+        "meets_25_fps_per_source": true,
+        "headroom_over_25_fps_percent": 126.3428251237622
+      }
+    },
+    "selected_geometry_online_final": {
+      "artifact_dir": "/tmp/mtmc-geometry-final-pK0rq8",
+      "evaluation_file": "evaluation.json",
+      "metrics": {
+        "per_camera_IDF1": {
+          "0": 0.316986,
+          "1": 0.302646,
+          "2": 0.267084
+        },
+        "pooled_IDF1": 0.244635,
+        "xcam": {
+          "xcam_tp": 916,
+          "xcam_fp": 452,
+          "xcam_fn": 2343,
+          "xcam_precision": 0.6695906432748538,
+          "xcam_recall": 0.28106781221233507,
+          "xcam_f1": 0.3959368921547439,
+          "mean_cameras_per_global_id": 1.1344667697063369,
+          "n_global_ids": 647
+        },
+        "ground_plane": {
+          "0.5m": {
+            "tp": 4982,
+            "fp": 7319,
+            "fn": 4536,
+            "precision": 0.4050077229493537,
+            "recall": 0.5234292918680395,
+            "MODA": -0.2455347762134903,
+            "MODP": 0.55754837786219,
+            "mean_distance_m": 0.221225811068905,
+            "ground_IDF1": 0.26289,
+            "ground_MOTA": -0.38548
+          },
+          "1m": {
+            "tp": 6167,
+            "fp": 6134,
+            "fn": 3351,
+            "precision": 0.501341354361434,
+            "recall": 0.6479302374448414,
+            "MODA": 0.003467114940113425,
+            "MODP": 0.6748729568415789,
+            "mean_distance_m": 0.325127043158421,
+            "ground_IDF1": 0.330354,
+            "ground_MOTA": -0.168943
+          }
+        }
+      },
+      "performance": {
+        "duration_s": 7.640321731567383,
+        "total_frames": 1203,
+        "mean_fps_per_source": 52.48470078729739,
+        "fps_total": 157.45410236189218,
+        "peak_vram_mb": 945.0,
+        "mean_vram_mb": 883.5,
+        "rss_start_mb": 1124.265625,
+        "rss_end_mb": 1015.51171875,
+        "rss_delta_mb": -108.75390625,
+        "rss_slope_mb_per_min": -972.4566523273754,
+        "leak_suspected": false,
+        "meets_25_fps_per_source": true,
+        "headroom_over_25_fps_percent": 109.93880314918957
+      },
+      "runtime": {
+        "final_map_tracklets": 642,
+        "final_map_global_ids": 543,
+        "processed_buckets": 401,
+        "attempted_buckets": 401,
+        "pending_buckets": 0,
+        "published_tracklets": 146,
+        "desync_buckets": 0,
+        "skew_refusals": 0,
+        "active_tracklets": 146,
+        "retained_observations": 1794
+      }
+    },
+    "selected_geometry_offline": {
+      "artifact": "metrics/results/mtmc_offline.json",
+      "inputs_identical_to": "selected_geometry_online_final",
+      "metrics": {
+        "per_camera_IDF1": {
+          "0": 0.316986,
+          "1": 0.302646,
+          "2": 0.267084
+        },
+        "pooled_IDF1": 0.244635,
+        "xcam": {
+          "xcam_tp": 916,
+          "xcam_fp": 452,
+          "xcam_fn": 2343,
+          "xcam_precision": 0.6695906432748538,
+          "xcam_recall": 0.28106781221233507,
+          "xcam_f1": 0.3959368921547439,
+          "mean_cameras_per_global_id": 1.1344667697063369,
+          "n_global_ids": 647
+        },
+        "ground_plane": {
+          "0.5m": {
+            "tp": 4982,
+            "fp": 7319,
+            "fn": 4536,
+            "precision": 0.4050077229493537,
+            "recall": 0.5234292918680395,
+            "MODA": -0.2455347762134903,
+            "MODP": 0.55754837786219,
+            "mean_distance_m": 0.221225811068905,
+            "ground_IDF1": 0.26289,
+            "ground_MOTA": -0.38548
+          },
+          "1m": {
+            "tp": 6167,
+            "fp": 6134,
+            "fn": 3351,
+            "precision": 0.501341354361434,
+            "recall": 0.6479302374448414,
+            "MODA": 0.003467114940113425,
+            "MODP": 0.6748729568415789,
+            "mean_distance_m": 0.325127043158421,
+            "ground_IDF1": 0.330354,
+            "ground_MOTA": -0.168943
+          }
+        }
+      },
+      "sweep": {
+        "point_count": 9,
+        "min_affinity_values": [
+          0.3,
+          0.5,
+          0.7
+        ],
+        "z_gate_values": [
+          2.0,
+          3.0,
+          4.0
+        ],
+        "selected_min_affinity": 0.3,
+        "selected_z_gate": 3.0,
+        "selection_basis": "min_affinity=0.3 has the highest pooled IDF1 and cross-camera F1. All tested z_gate values tie, so retain 3.0."
+      }
+    },
+    "final_appearance_optional": {
+      "artifact_dir": "/tmp/mtmc-appearance-final-KafwsL",
+      "evaluation_file": "evaluation.json",
+      "metrics": {
+        "per_camera_IDF1": {
+          "0": 0.314177,
+          "1": 0.309101,
+          "2": 0.265947
+        },
+        "pooled_IDF1": 0.241628,
+        "xcam": {
+          "xcam_tp": 931,
+          "xcam_fp": 499,
+          "xcam_fn": 2318,
+          "xcam_precision": 0.651048951048951,
+          "xcam_recall": 0.28654970760233917,
+          "xcam_f1": 0.3979482795469117,
+          "mean_cameras_per_global_id": 1.1295731707317074,
+          "n_global_ids": 656
+        },
+        "ground_plane": {
+          "0.5m": {
+            "tp": 4902,
+            "fp": 7324,
+            "fn": 4616,
+            "precision": 0.4009487976443645,
+            "recall": 0.5150241647404917,
+            "MODA": -0.2544652237865097,
+            "MODP": 0.5540200339144835,
+            "mean_distance_m": 0.22298998304275827,
+            "ground_IDF1": 0.254783,
+            "ground_MOTA": -0.39273
+          },
+          "1m": {
+            "tp": 6087,
+            "fp": 6139,
+            "fn": 3431,
+            "precision": 0.49787338459021757,
+            "recall": 0.6395251103172935,
+            "MODA": -0.005463332632906104,
+            "MODP": 0.6721174326942584,
+            "mean_distance_m": 0.32788256730574167,
+            "ground_IDF1": 0.322756,
+            "ground_MOTA": -0.173776
+          }
+        }
+      },
+      "performance": {
+        "duration_s": 10.610174655914307,
+        "total_frames": 1203,
+        "mean_fps_per_source": 37.793911316669536,
+        "fps_total": 113.38173395000861,
+        "peak_vram_mb": 1085.0,
+        "mean_vram_mb": 1020.0,
+        "rss_start_mb": 1160.1875,
+        "rss_end_mb": 1049.359375,
+        "rss_delta_mb": -110.828125,
+        "rss_slope_mb_per_min": -402.60237834429125,
+        "leak_suspected": false,
+        "meets_25_fps_per_source": true,
+        "headroom_over_25_fps_percent": 51.175645266678146
+      },
+      "runtime": {
+        "final_map_tracklets": 653,
+        "final_map_global_ids": 552,
+        "processed_buckets": 401,
+        "attempted_buckets": 401,
+        "pending_buckets": 0,
+        "published_tracklets": 154,
+        "desync_buckets": 0,
+        "skew_refusals": 0,
+        "active_tracklets": 154,
+        "retained_observations": 1801
+      },
+      "selected_as_default": false
+    },
+    "rtsp_300s_soak": {
+      "artifact_dir": "/tmp/mtmc-rtsp-soak-m3888-e0zgg1",
+      "evidence_file": "evidence.json",
+      "outcome": "completed_with_rate_limited_clock_discontinuities",
+      "performance": {
+        "duration_s": 299.9437429904938,
+        "fps_total": 89.3867621064185,
+        "leak_suspected": false,
+        "mean_fps_per_source": 29.795587368806167,
+        "mean_vram_mb": 1152.774193548387,
+        "peak_vram_mb": 1173.0,
+        "rss_delta_mb": -87.3984375,
+        "rss_end_mb": 1076.33203125,
+        "rss_slope_mb_per_min": 1.9422003047584477,
+        "rss_start_mb": 1163.73046875,
+        "total_frames": 26811
+      },
+      "health": {
+        "all_sources_live_in_every_sample": true,
+        "current_fps_by_source": {
+          "0": {
+            "last": 30.00155062108083,
+            "max": 39.97418649470613,
+            "mean": 30.36257879597563,
+            "min": 26.132663532435142
+          },
+          "1": {
+            "last": 30.010474156991528,
+            "max": 39.9687686723813,
+            "mean": 30.37201403684437,
+            "min": 25.982555703076024
+          },
+          "2": {
+            "last": 30.008247478788395,
+            "max": 39.95924402759962,
+            "mean": 30.397749212308394,
+            "min": 26.337563759158645
+          }
+        },
+        "final_frame_counts": {
+          "0": 8937,
+          "1": 8937,
+          "2": 8937
+        },
+        "sample_count": 30
+      },
+      "association": {
+        "active_tracklets": 46,
+        "attempted_buckets": 8646,
+        "attempted_minus_processed": 8,
+        "desync_buckets": 0,
+        "invalid_clock_events_are_liveness_only": true,
+        "pending_buckets": 0,
+        "processed_buckets": 8638,
+        "published_tracklets": 46,
+        "retained_bound_at_final_active_count": 2760,
+        "retained_observations": 1976,
+        "retained_within_final_bound": true,
+        "skew_refusals": 0,
+        "worker_max_skew_log_count": 0,
+        "worker_missing_sources_log_count": 0
+      },
+      "shutdown": {
+        "container_exit_code": 0,
+        "container_finished_at_utc": "2026-08-20T05:52:46.129037779Z",
+        "pending_buckets_at_shutdown": 0,
+        "pipeline_stop_at_utc": "2026-08-20T05:52:45.707414572Z",
+        "pipeline_stop_to_container_finished_ms": 421.62300000000005,
+        "pipeline_stop_to_tracker_deinit_ms": 175.413,
+        "tracker_deinitialized_at_utc": "2026-08-20T05:52:45.882827857Z"
+      }
+    }
+  },
+  "comparisons": {
+    "selected_geometry_vs_person_only_baseline": {
+      "pooled_IDF1_delta": 0.046933,
+      "pooled_IDF1_relative_percent": 23.739264145026358,
+      "xcam_precision_delta": 0.6695906432748538,
+      "xcam_recall_delta": 0.28106781221233507,
+      "xcam_f1_delta": 0.3959368921547439,
+      "ground_0.5m_MODA_delta": 0.07470056734608099,
+      "ground_0.5m_MODP_delta": 0.0014447052943618033,
+      "ground_1m_MODA_delta": 0.09067030888842187,
+      "ground_1m_MODP_delta": -0.011659386854858678,
+      "fps_per_source_delta": -4.101005493643157,
+      "fps_per_source_relative_percent": -7.247423003403381,
+      "peak_vram_mb_delta": -6.0
+    },
+    "final_appearance_vs_selected_geometry": {
+      "pooled_IDF1_delta": -0.003006999999999982,
+      "xcam_precision_delta": -0.01854169222590285,
+      "xcam_recall_delta": 0.005481895390004099,
+      "xcam_f1_delta": 0.002011387392167774,
+      "ground_0.5m_MODA_delta": -0.008930447573019418,
+      "ground_0.5m_MODP_delta": -0.0035283439477065137,
+      "ground_1m_MODA_delta": -0.008930447573019529,
+      "ground_1m_MODP_delta": -0.0027555241473204983,
+      "fps_per_source_delta": -14.690789470627855,
+      "fps_per_source_relative_percent": -27.990612979131996,
+      "peak_vram_mb_delta": 140.0,
+      "decision": "Keep appearance available as an opt-in mode, but do not select it as the default."
+    }
+  },
+  "online_offline_one_to_one_agreement": {
+    "source": "/tmp/mtmc-geometry-final-pK0rq8/evaluation.json assignment_agreement",
+    "definition": {
+      "row_key": "(source_id, generation, frame_num, object_id); offline and online key sets must be identical, and duplicate keys are rejected.",
+      "warmup": "For each tracklet (source_id, generation, object_id), exclude rows where frame_num minus that tracklet first frame is less than 10.",
+      "unassigned": "Exclude a retained row only when both offline and online global_id are negative. A row assigned on only one side remains evaluated and cannot match.",
+      "label_alignment": "Build a contingency matrix from rows assigned on both sides and solve a maximum-weight one-to-one linear assignment. This is invariant to global-ID label permutation and penalizes splits and merges.",
+      "row_filter": "class_id == 0 (person); tracker object_id 0 is valid and retained"
+    },
+    "counts": {
+      "warmup_frames_per_tracklet": 10,
+      "input_rows": 14799,
+      "excluded_warmup_rows": 3628,
+      "excluded_both_unassigned_rows": 563,
+      "evaluated_rows": 10608,
+      "assigned_on_both_rows": 10608,
+      "matched_rows": 10608,
+      "disagreement_rows": 0
+    },
+    "agreement": 1.0,
+    "threshold": 0.95,
+    "passes": true
+  },
+  "rtsp_clock_and_association_evidence": {
+    "source": "/tmp/mtmc-rtsp-soak-m3888-e0zgg1/evidence.json",
+    "clock_liveness": {
+      "post_ready_invalid_ntp_source_transitions": 9,
+      "grouped_skipped_mux_attempts": 8,
+      "attempt_with_two_affected_sources": 4,
+      "transition_reason_counts": {
+        "invalid_frame_metadata": 9
+      },
+      "recovery_events": 9,
+      "max_recovery_latency_ms": 31.703,
+      "interpretation": "Nine source transitions were grouped into eight atomically skipped mux attempts because attempt 4 affected two sources. Every source recovered on its next valid frame; maximum measured recovery was 31.703 ms."
+    },
+    "accepted_association": {
+      "attempted_buckets": 8646,
+      "processed_buckets": 8638,
+      "skipped_invalid_clock_attempts": 8,
+      "pending_buckets": 0,
+      "missing_source_events": 0,
+      "max_skew_events": 0,
+      "desync_buckets": 0,
+      "skew_refusals": 0,
+      "interpretation": "Invalid-clock batches are liveness-only skips and are not accepted for association. Accepted association recorded zero missing-source, skew, and desynchronization events."
+    },
+    "cross_view_output": {
+      "authoritative_example_global_id": 311,
+      "authoritative_example_tracklets": [
+        {
+          "generation": 0,
+          "global_id": 311,
+          "object_id": 1853,
+          "source_id": 0
+        },
+        {
+          "generation": 0,
+          "global_id": 311,
+          "object_id": 2132,
+          "source_id": 0
+        },
+        {
+          "generation": 0,
+          "global_id": 311,
+          "object_id": 2254,
+          "source_id": 0
+        },
+        {
+          "generation": 0,
+          "global_id": 311,
+          "object_id": 2334,
+          "source_id": 0
+        },
+        {
+          "generation": 0,
+          "global_id": 311,
+          "object_id": 1857,
+          "source_id": 1
+        },
+        {
+          "generation": 0,
+          "global_id": 311,
+          "object_id": 1877,
+          "source_id": 1
+        },
+        {
+          "generation": 0,
+          "global_id": 311,
+          "object_id": 2195,
+          "source_id": 1
+        },
+        {
+          "generation": 0,
+          "global_id": 311,
+          "object_id": 1821,
+          "source_id": 2
+        },
+        {
+          "generation": 0,
+          "global_id": 311,
+          "object_id": 2353,
+          "source_id": 2
+        },
+        {
+          "generation": 0,
+          "global_id": 311,
+          "object_id": 2484,
+          "source_id": 2
+        }
+      ],
+      "authoritative_shutdown_global_ids_spanning_all_three_sources": 94,
+      "authoritative_shutdown_global_ids_spanning_at_least_two_sources": 267,
+      "example": {
+        "basis": "global_id values written live into output_stream*.csv; elapsed times derived from 30000/1001 frame cadence",
+        "first_frame": 4990,
+        "global_id": 1751,
+        "last_frame": 5829,
+        "source_count": 3,
+        "sources": {
+          "0": {
+            "first_elapsed_s": 191.157633,
+            "first_frame": 5730,
+            "last_elapsed_s": 194.327467,
+            "last_frame": 5825,
+            "object_ids": [
+              2132
+            ],
+            "rows": 96,
+            "span_s": 3.169833
+          },
+          "1": {
+            "first_elapsed_s": 166.4663,
+            "first_frame": 4990,
+            "last_elapsed_s": 194.460933,
+            "last_frame": 5829,
+            "object_ids": [
+              1719
+            ],
+            "rows": 792,
+            "span_s": 27.994633
+          },
+          "2": {
+            "first_elapsed_s": 166.4663,
+            "first_frame": 4990,
+            "last_elapsed_s": 194.2941,
+            "last_frame": 5824,
+            "object_ids": [
+              1784,
+              1821
+            ],
+            "rows": 791,
+            "span_s": 27.8278
+          }
+        },
+        "span_s": 27.994633,
+        "total_rows": 1679
+      },
+      "live_global_ids_spanning_all_three_sources": 201,
+      "live_global_ids_spanning_at_least_two_sources": 475
+    },
+    "cleanup": {
+      "pre_existing_pids_preserved": [
+        251534,
+        251543,
+        251544,
+        251546
+      ],
+      "pre_existing_port_8554_listening": true,
+      "pre_existing_processes_alive_after_cleanup": true,
+      "stopped_exact_temporary_pids": [
+        754326,
+        754342,
+        754332,
+        738155
+      ],
+      "temporary_pids_absent_after_cleanup": true,
+      "temporary_port_8654_closed": true
+    },
+    "validation": {
+      "focused_unit_tests": "103 passed",
+      "git_diff_check": "passed",
+      "ruff": "all checks passed for relevant files",
+      "short_rtsp_drain": {
+        "artifact_dir": "/tmp/mtmc-rtsp-drain-WHmQ74",
+        "attempted_buckets": 1141,
+        "desync_buckets": 0,
+        "duration_s": 30,
+        "mean_fps_per_source": 53.8557,
+        "pipeline_stop_to_tracker_deinit_ms": 263.883,
+        "processed_buckets": 1141,
+        "retained_observations": 1813
+      },
+      "synthetic_long_lived_tracklet": {
+        "batches": 1500,
+        "expected_bound": 1080,
+        "five_300_batch_window_seconds": [
+          1.8567,
+          1.9713,
+          2.1887,
+          1.9879,
+          1.9572
+        ],
+        "retained_observations": 1080,
+        "sources": 3,
+        "tracks_per_source": 6,
+        "ttl_attempts": 60
+      }
+    }
+  },
+  "provenance": {
+    "person_only_no_mtmc_baseline": {
+      "evaluation_sha256": "f309bb0f77d3d36a02af564e86b44a1681861061df5e535cd439e955d1a48231",
+      "perf_sha256": "757f7a751b5d8190b037a06cf17e84b45de6a7e83c0743fffabca8fa634cb3b6",
+      "csv_sha256": {
+        "0": "18f158f53b50a44eb3fb80fd6acff373a07d01c3f7ef66ea3444707014d3639d",
+        "1": "3dd608aaec781b0208327f91302470f80d9cb75b047b45a99734c9ff61c4ab06",
+        "2": "076495428e4537cdf71249a59b33162f97d096f58e32fa6de2951fcf94ebc562"
+      }
+    },
+    "selected_geometry_online_final": {
+      "evaluation_sha256": "f5d4ed8df9eadb78f079603038dce88271a31d46037acd96dc5a9221218adcbc",
+      "perf_sha256": "494fc29354d34e3f1ee98de565d0a524e3b77fc32a23271fa14d381f531f62ef",
+      "final_map_sha256": "8a2d983a16c4b22cd154d51bac5d810c48c8b6d128f9cc03dc1880680639d55e",
+      "container_log_sha256": "d41910d6ff1f756fdd76d6e4c9bebcebb55376049e254f873b9173adc95fa19e",
+      "csv_sha256": {
+        "0": "ffe38bbd4c26d8107f97e18c105343f06e6380ae19799c9213e907213ecd135a",
+        "1": "8f00588f7b647a8beaf7082ace1df07bb4a25fb60ba4ed279aa79345e72b317a",
+        "2": "8a4f6f68d2efc4126fae6cc1fee1081653aff9e9d524bb69a42ef85e29786f24"
+      }
+    },
+    "selected_geometry_offline": {
+      "path": "metrics/results/mtmc_offline.json",
+      "sha256": "9c5ae2c38118169ad2da72c831b2e76764035fa25382d22dc1ff62654fe78aa6",
+      "input_csv_sha256": {
+        "0": "ffe38bbd4c26d8107f97e18c105343f06e6380ae19799c9213e907213ecd135a",
+        "1": "8f00588f7b647a8beaf7082ace1df07bb4a25fb60ba4ed279aa79345e72b317a",
+        "2": "8a4f6f68d2efc4126fae6cc1fee1081653aff9e9d524bb69a42ef85e29786f24"
+      }
+    },
+    "final_appearance_optional": {
+      "evaluation_sha256": "155a387555bca2d10bad316988014199708c94827167ff1787699c35e6f14ef8",
+      "perf_sha256": "4f1e975d9d68f6a8378fe5f1d1a99db2843d206ac1f5b9299be3fb2a3a6bf6c3",
+      "final_map_sha256": "fe9da9a2e311496c087bfb9717cf4b041ae9f091680bf5584de84eda4f970d88",
+      "container_log_sha256": "f8cb4342eb8db0d8351f5842d53646f02cf6a0944b72671c8160fdc3f52f7131",
+      "reid_config_sha256": "695f3d5d20f5b943683b5ebdd716a08afb883449cd47e9ab6a31063dae1aa7bf",
+      "csv_sha256": {
+        "0": "c8b00f38fbf857f4f6514c34b1470e8d9ae574e32b4feecc3382b6e8e13234f7",
+        "1": "5c1c2b1e49d4df11d2261fec5466318407cf4deaaa3e8c910008d9d26d6cd384",
+        "2": "8f221386ec17f36584e9233c20e03e9d93e84b5072ed4e73393b081de73af281"
+      }
+    },
+    "rtsp_300s_soak": {
+      "path": "/tmp/mtmc-rtsp-soak-m3888-e0zgg1",
+      "evidence_sha256": "c0b9739d53127ef88823108054fc0a15b8016457ecb88774787dcf4935b50c46",
+      "artifacts": {
+        "container.log": {
+          "bytes": 44245,
+          "sha256": "488aa2cf096cd34ec14e5466159b6e25c69f2ef3d79cc366c9f828a04feb4f9e"
+        },
+        "launch_cleanup_manifest.json": {
+          "bytes": 10862,
+          "sha256": "516118f6764749c59e50d416f5d6710379c458b51dd7ceb179a97de4bb582fd7"
+        },
+        "mtmc.json": {
+          "bytes": 202573,
+          "sha256": "9bfe0e9b403c7f97b0779f2c131c8ed621da7a53c5d3dbc5e13beeaf4459fb70"
+        },
+        "output_stream0.csv": {
+          "bytes": 8157608,
+          "sha256": "6efaf3d66d350c02295827430f9ab8400c0cdc600f297e1ae5ff516e794ca896"
+        },
+        "output_stream1.csv": {
+          "bytes": 9824278,
+          "sha256": "31d2a46efe2a000852c27885128e425fc72039e5bc660571359da3fb0a0596d7"
+        },
+        "output_stream2.csv": {
+          "bytes": 11400289,
+          "sha256": "2654f54d20896b50b865d688395a5233076a3f1002c7954bc8b0a650bc6debdb"
+        },
+        "perf.json": {
+          "bytes": 6231,
+          "sha256": "be9dc284df5ce194be429c07426bef0859c7d33f85e69d6b24e2d9a54d00d20b"
+        }
+      }
+    }
+  },
+  "commands": {
+    "evaluator_entrypoint": ".venv/bin/python -m metrics.evaluate_mtmc",
+    "reproduce_person_only_pipeline": "docker compose run --rm -v /tmp/mtmc-baseline-PL8IOn:/run pipeline python3 pipelines/multi_stream.py --uri file:///workspace/data/wildtrack_c1_gt.mp4 --uri file:///workspace/data/wildtrack_c2_gt.mp4 --uri file:///workspace/data/wildtrack_c3_gt.mp4 --output-dir /run --perf-json /run/perf.json --perf-interval 1 --no-sync --conf-threshold 0.18",
+    "reproduce_selected_geometry_pipeline": "docker compose run --rm -v /tmp/mtmc-geometry-final-pK0rq8:/run pipeline python3 pipelines/multi_stream.py --uri file:///workspace/data/wildtrack_c1_gt.mp4 --uri file:///workspace/data/wildtrack_c2_gt.mp4 --uri file:///workspace/data/wildtrack_c3_gt.mp4 --output-dir /run --perf-json /run/perf.json --perf-interval 1 --no-sync --conf-threshold 0.18 --mtmc --homography 0=configs/homography_C1.json --homography 1=configs/homography_C2.json --homography 2=configs/homography_C3.json --mtmc-min-affinity 0.3 --mtmc-json /run/mtmc.json",
+    "reproduce_final_appearance_pipeline": "docker compose run --rm -v /tmp/mtmc-appearance-final-KafwsL:/run pipeline python3 pipelines/multi_stream.py --uri file:///workspace/data/wildtrack_c1_gt.mp4 --uri file:///workspace/data/wildtrack_c2_gt.mp4 --uri file:///workspace/data/wildtrack_c3_gt.mp4 --output-dir /run --perf-json /run/perf.json --perf-interval 1 --no-sync --conf-threshold 0.18 --mtmc --homography 0=configs/homography_C1.json --homography 1=configs/homography_C2.json --homography 2=configs/homography_C3.json --mtmc-min-affinity 0.3 --mtmc-appearance --reid-config configs/nvinfer_reid.txt --mtmc-w-app 0.5 --mtmc-json /run/mtmc.json",
+    "person_only_baseline": ".venv/bin/python -m metrics.evaluate_mtmc --wildtrack-root /media/dexter/PortableSSD/Datasets/WildTrack/labelled_ds --pred /tmp/mtmc-baseline-PL8IOn/output_stream0.csv /tmp/mtmc-baseline-PL8IOn/output_stream1.csv /tmp/mtmc-baseline-PL8IOn/output_stream2.csv --camera 0=C1 1=C2 2=C3 --homography 0=configs/homography_C1.json 1=configs/homography_C2.json 2=configs/homography_C3.json --ground-gates 0.5 1.0 --output-json /tmp/mtmc-baseline-PL8IOn/evaluation-person-only.json",
+    "selected_geometry_combined_online_offline": ".venv/bin/python -m metrics.evaluate_mtmc --wildtrack-root /media/dexter/PortableSSD/Datasets/WildTrack/labelled_ds --pred /tmp/mtmc-geometry-final-pK0rq8/output_stream0.csv /tmp/mtmc-geometry-final-pK0rq8/output_stream1.csv /tmp/mtmc-geometry-final-pK0rq8/output_stream2.csv --camera 0=C1 1=C2 2=C3 --homography 0=configs/homography_C1.json 1=configs/homography_C2.json 2=configs/homography_C3.json --fuse-offline --final-map /tmp/mtmc-geometry-final-pK0rq8/mtmc.json --agreement-warmup-frames 10 --min-affinity 0.3 --z-gate 3.0 --ground-gates 0.5 1.0 --output-json /tmp/mtmc-geometry-final-pK0rq8/evaluation.json",
+    "offline_selected_and_sweep": ".venv/bin/python -m metrics.evaluate_mtmc --wildtrack-root /media/dexter/PortableSSD/Datasets/WildTrack/labelled_ds --pred /tmp/mtmc-geometry-final-pK0rq8/output_stream0.csv /tmp/mtmc-geometry-final-pK0rq8/output_stream1.csv /tmp/mtmc-geometry-final-pK0rq8/output_stream2.csv --camera 0=C1 1=C2 2=C3 --homography 0=configs/homography_C1.json 1=configs/homography_C2.json 2=configs/homography_C3.json --fuse-offline --min-affinity 0.3 --z-gate 3.0 --ground-gates 0.5 1.0 --sweep --sweep-min-affinity 0.3 0.5 0.7 --sweep-z-gate 2 3 4 --output-json metrics/results/mtmc_offline.json",
+    "final_appearance_evaluation": ".venv/bin/python -m metrics.evaluate_mtmc --wildtrack-root /media/dexter/PortableSSD/Datasets/WildTrack/labelled_ds --pred /tmp/mtmc-appearance-final-KafwsL/output_stream0.csv /tmp/mtmc-appearance-final-KafwsL/output_stream1.csv /tmp/mtmc-appearance-final-KafwsL/output_stream2.csv --camera 0=C1 1=C2 2=C3 --homography 0=configs/homography_C1.json 1=configs/homography_C2.json 2=configs/homography_C3.json --final-map /tmp/mtmc-appearance-final-KafwsL/mtmc.json --min-affinity 0.3 --z-gate 3.0 --ground-gates 0.5 1.0 --output-json /tmp/mtmc-appearance-final-KafwsL/evaluation.json",
+    "rtsp_soak_source_manifest": "The exact MediaMTX config, concat-list hashes, process IDs, restarts, and cleanup audit are in /tmp/mtmc-rtsp-soak-m3888-e0zgg1/launch_cleanup_manifest.json (SHA-256 516118f6764749c59e50d416f5d6710379c458b51dd7ceb179a97de4bb582fd7). The commands below are the final rate-matched source commands from that manifest.",
+    "rtsp_soak_mediamtx": "/home/dexter/mediamtx/mediamtx /tmp/m388-rtsp-sources-uXBAj4/mediamtx.yml",
+    "rtsp_soak_publisher_source_0": "ffmpeg -hide_banner -loglevel warning -re -itsscale 2 -f concat -safe 0 -i /tmp/m388-rtsp-sources-uXBAj4/c1.ffconcat -map 0:v:0 -an -c copy -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8654/soak0",
+    "rtsp_soak_publisher_source_1": "ffmpeg -hide_banner -loglevel warning -re -itsscale 2 -f concat -safe 0 -i /tmp/m388-rtsp-sources-uXBAj4/c2.ffconcat -map 0:v:0 -an -c copy -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8654/soak1",
+    "rtsp_soak_publisher_source_2": "ffmpeg -hide_banner -loglevel warning -re -itsscale 2 -itsoffset 0.233 -f concat -safe 0 -i /tmp/m388-rtsp-sources-uXBAj4/c3.ffconcat -map 0:v:0 -an -c copy -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8654/soak2",
+    "reproduce_rtsp_soak_pipeline": "mkdir -p /tmp/mtmc-rtsp-soak-replay && docker run --rm -d --gpus all --network host --entrypoint python3 --mount type=bind,src=${PWD},dst=/workspace,readonly --mount type=bind,src=/tmp/mtmc-rtsp-soak-replay,dst=/soak-output ds-pipeline pipelines/multi_stream.py --uri rtsp://127.0.0.1:8654/soak0 --uri rtsp://127.0.0.1:8654/soak1 --uri rtsp://127.0.0.1:8654/soak2 --output-dir /soak-output --perf-json /soak-output/perf.json --perf-interval 10 --duration 300 --conf-threshold 0.18 --mtmc --homography 0=configs/homography_C1.json --homography 1=configs/homography_C2.json --homography 2=configs/homography_C3.json --mtmc-min-affinity 0.3 --mtmc-sync-bucket-ms 33 --mtmc-max-skew-ms 100 --mtmc-appearance --reid-config configs/nvinfer_reid.txt --mtmc-json /soak-output/mtmc.json --mtmc-osd-labels",
+    "rtsp_soak_container_historical": "docker run --name m388-rtsp-soak30-e0zgg1 -d --gpus all --network host --entrypoint python3 --mount type=bind,src=/home/dexter/Personal/deepstream-rtsp-pipeline,dst=/workspace,readonly --mount type=bind,src=/tmp/mtmc-rtsp-soak-m3888-e0zgg1,dst=/soak-output ds-pipeline pipelines/multi_stream.py --uri rtsp://127.0.0.1:8654/soak0 --uri rtsp://127.0.0.1:8654/soak1 --uri rtsp://127.0.0.1:8654/soak2 --output-dir /soak-output --perf-json /soak-output/perf.json --perf-interval 10 --duration 300 --mtmc --homography 0=configs/homography_C1.json --homography 1=configs/homography_C2.json --homography 2=configs/homography_C3.json --mtmc-min-affinity 0.3 --mtmc-sync-bucket-ms 33 --mtmc-max-skew-ms 100 --mtmc-appearance --reid-config configs/nvinfer_reid.txt --mtmc-json /soak-output/mtmc.json --mtmc-osd-labels"
+  },
+  "validation": {
+    "offline_json": "passed",
+    "comparison_json": "passed",
+    "agreement_recomputed_from_final_geometry_csvs": "passed; exact match to evaluation.json",
+    "notebook_json": "passed",
+    "notebook_nbformat": "passed (nbformat 4.5)",
+    "notebook_python_ast": "passed (9 code cells)",
+    "notebook_headless_execution": "passed with MPLBACKEND=Agg; loaded 4,403 held-out projection-error samples",
+    "notebook_ruff": "all checks passed"
+  },
+  "open_gates": [],
+  "limitations": [
+    "The comparative file-input runs are 401-frame-per-camera smoke tests; the RTSP stability evidence is a separate 300 s soak.",
+    "The 300 s soak establishes bounded behavior over that interval, not indefinite production uptime.",
+    "The nine invalid-NTP transitions were recovered liveness events. They were atomically excluded before association and did not produce missing-source, skew, or desynchronization statistics.",
+    "The recorded evidence CSVs predate the trailing reconnect-generation, association-bucket, and acceptance columns. Those runs had no reconnects or rejected file batches; the evaluator defaults them to generation 0 and accepted frame-number batches, so their metrics and hashes remain valid while newly generated CSVs are intentionally byte-different."
+  ]
+}

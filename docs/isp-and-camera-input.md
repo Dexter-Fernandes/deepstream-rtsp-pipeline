@@ -113,7 +113,7 @@ Concrete failure modes, each with the ISP root cause and the detection symptom:
 
 ### Incorrect lens shading correction
 **Cause**: LSC table calibrated for a different lens or at a different temperature.
-**Symptom**: Corner brightness drops 20–30%. Pedestrians and cyclists at frame edges have systematically lower confidence. With `conf_threshold=0.25`, edge objects are still detected; at `conf_threshold=0.35` they drop out. This appears as a position-dependent recall bias that worsens at the same threshold across all weather conditions.
+**Symptom**: Corner brightness drops 20–30%. Pedestrians and cyclists at frame edges have systematically lower confidence. With `conf_threshold=0.18`, edge objects are still detected; at `conf_threshold=0.35` they drop out. This appears as a position-dependent recall bias that worsens at the same threshold across all weather conditions.
 
 ---
 

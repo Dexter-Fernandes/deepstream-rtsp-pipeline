@@ -254,3 +254,6 @@ auto.key
 output*.csv
 
 JD.md
+
+# Weights & Biases
+wandb/

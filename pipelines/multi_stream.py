@@ -2,9 +2,23 @@ import argparse
 import ctypes
 import logging
 import signal
+from collections import deque
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
 
+from pipelines.ground_plane import Homography
+from pipelines.mtmc import MtmcConfig, MtmcFrame
+from pipelines.mtmc_runtime import (
+    MtmcBatchReceipt,
+    MtmcRuntime,
+    frame_timestamp_ns,
+    load_homography_bindings,
+    project_person_detections,
+    with_global_ids,
+)
+from pipelines.reid import extract_frame_reid_embeddings
 from pipelines.structured_log import configure_pipeline_logging, get_pipeline_logger, log_event
 
 configure_pipeline_logging()
@@ -30,12 +44,212 @@ class MultiStreamConfig:
     output_dir: str = "."
     restream_base_port: int | None = None
     anonymise: bool = False
-    conf_threshold: float = 0.25
+    conf_threshold: float = 0.18
     tracker_config: str = "configs/tracker_nvdcf.yml"
     perf_json: str | None = None
     perf_interval: float = 5.0
     duration: int | None = None
     no_sync: bool = False
+    mtmc: bool = False
+    homographies: list[str] = field(default_factory=list)
+    mtmc_z_gate: float = 3.0
+    mtmc_min_affinity: float = 0.5
+    mtmc_reassign_interval: int = 10
+    mtmc_json: str | None = None
+    mtmc_osd_labels: bool = False
+    mtmc_sync_bucket_ms: float = 33.0
+    mtmc_max_skew_ms: float = 100.0
+    mtmc_appearance: bool = False
+    reid_config: str = "configs/nvinfer_reid.txt"
+    mtmc_w_app: float = 0.5
+
+
+@dataclass
+class StreamReconnectDetector:
+    """Recognise a successful connection that follows a real pad disconnect."""
+
+    _has_connected: bool = False
+    _disconnected: bool = False
+
+    def connected(self) -> bool:
+        is_reconnect = self._has_connected and self._disconnected
+        self._has_connected = True
+        self._disconnected = False
+        return is_reconnect
+
+    def disconnected(self) -> None:
+        if self._has_connected:
+            self._disconnected = True
+
+
+@dataclass(frozen=True)
+class RtspClockBatch:
+    """Clock-state changes and fusion eligibility for one muxed RTSP batch."""
+
+    fuse_batch: bool
+    advance_liveness: bool = False
+    waiting_sources: tuple[int, ...] = ()
+    ready_sources: tuple[int, ...] = ()
+    lost_sources: tuple[int, ...] = ()
+    recovered_sources: tuple[int, ...] = ()
+    invalid_sources: tuple[int, ...] = ()
+
+
+class RtspClockGate:
+    """Hold MTMC batches until every RTSP source has acquired its first RTCP clock."""
+
+    def __init__(self, *, expected_sources: set[int]) -> None:
+        self._expected_sources = frozenset(expected_sources)
+        self._ready_sources: set[int] = set()
+        self._waiting_reported: set[int] = set()
+        self._lost_sources: set[int] = set()
+
+    def observe_batch(self, timestamps: Mapping[int, int]) -> RtspClockBatch:
+        unexpected = set(timestamps).difference(self._expected_sources)
+        if unexpected:
+            raise ValueError(f"unexpected RTSP source {min(unexpected)}")
+        ready_before_batch = self._expected_sources.issubset(self._ready_sources)
+        waiting_sources = []
+        ready_sources = []
+        invalid_sources = []
+        recovered_sources = []
+        for source_id in sorted(self._expected_sources):
+            timestamp_ns = int(timestamps.get(source_id, 0))
+            if int(timestamp_ns) > 0:
+                if source_id not in self._ready_sources:
+                    self._ready_sources.add(source_id)
+                    ready_sources.append(source_id)
+                elif source_id in self._lost_sources:
+                    recovered_sources.append(source_id)
+            elif source_id not in self._ready_sources:
+                if source_id not in self._waiting_reported:
+                    self._waiting_reported.add(source_id)
+                    waiting_sources.append(source_id)
+            else:
+                invalid_sources.append(source_id)
+
+        newly_lost_sources = set(invalid_sources).difference(self._lost_sources)
+        self._lost_sources = set(invalid_sources)
+        complete = set(timestamps) == self._expected_sources
+
+        return RtspClockBatch(
+            fuse_batch=ready_before_batch and complete and not invalid_sources,
+            advance_liveness=ready_before_batch,
+            waiting_sources=tuple(waiting_sources),
+            ready_sources=tuple(ready_sources),
+            lost_sources=tuple(sorted(newly_lost_sources)),
+            recovered_sources=tuple(recovered_sources),
+            invalid_sources=tuple(invalid_sources),
+        )
+
+
+@dataclass(frozen=True)
+class _FrameReceiptEntry:
+    frame_num: int
+    receipt: MtmcBatchReceipt
+
+
+class FrameReceiptLedger:
+    """Bounded exact-FIFO handoff from the mux probe to per-source branches."""
+
+    def __init__(
+        self,
+        *,
+        expected_sources: Iterable[int],
+        max_pending_per_source: int = 1024,
+    ) -> None:
+        if max_pending_per_source < 1:
+            raise ValueError("max_pending_per_source must be positive")
+        expected = frozenset(int(source_id) for source_id in expected_sources)
+        self._queues = {source_id: deque() for source_id in expected}
+        self._poisoned_sources: set[int] = set()
+        self._max_pending_per_source = int(max_pending_per_source)
+        self._lock = Lock()
+
+    def record(
+        self,
+        frames: Iterable[tuple[int, int]],
+        receipt: MtmcBatchReceipt,
+    ) -> tuple[tuple[int, int], ...]:
+        """Record one receipt per source/frame and return any overflowed keys."""
+        dropped = []
+        with self._lock:
+            for source_id, frame_num in frames:
+                source_id = int(source_id)
+                frame_num = int(frame_num)
+                if source_id not in self._queues:
+                    raise ValueError(f"unknown receipt source {source_id}")
+                queue = self._queues[source_id]
+                if len(queue) >= self._max_pending_per_source:
+                    expired = queue.popleft()
+                    dropped.append((source_id, expired.frame_num))
+                    self._poisoned_sources.add(source_id)
+                queue.append(_FrameReceiptEntry(frame_num, receipt))
+        return tuple(dropped)
+
+    def consume(self, source_id: int, frame_num: int) -> MtmcBatchReceipt | None:
+        """Consume only an exact FIFO match; clear a desynchronised source queue."""
+        with self._lock:
+            source_id = int(source_id)
+            queue = self._queues.get(source_id)
+            if not queue:
+                return None
+            if source_id in self._poisoned_sources:
+                queue.clear()
+                self._poisoned_sources.remove(source_id)
+                return None
+            entry = queue.popleft()
+            if entry.frame_num != int(frame_num):
+                queue.clear()
+                return None
+            return entry.receipt
+
+
+@dataclass(frozen=True)
+class MtmcSetup:
+    config: MtmcConfig
+    homographies: Mapping[int, Homography]
+
+
+def prepare_mtmc(config: MultiStreamConfig) -> MtmcSetup:
+    """Validate online MTMC options and load each source's calibration."""
+    if not config.mtmc:
+        raise ValueError("MTMC setup requested while --mtmc is disabled")
+    if len(config.uris) < 2:
+        raise ValueError("--mtmc requires at least two sources")
+    source_modes = {_is_file_uri(uri) for uri in config.uris}
+    if len(source_modes) != 1:
+        raise ValueError("--mtmc cannot mix file and RTSP clocks")
+    if config.mtmc_z_gate <= 0.0:
+        raise ValueError("--mtmc-z-gate must be positive")
+    if not 0.0 <= config.mtmc_min_affinity <= 1.0:
+        raise ValueError("--mtmc-min-affinity must be between 0 and 1")
+    if config.mtmc_reassign_interval < 1:
+        raise ValueError("--mtmc-reassign-interval must be at least 1")
+    if config.mtmc_sync_bucket_ms <= 0.0:
+        raise ValueError("--mtmc-sync-bucket-ms must be positive")
+    if config.mtmc_max_skew_ms <= 0.0:
+        raise ValueError("--mtmc-max-skew-ms must be positive")
+    if config.mtmc_w_app < 0.0:
+        raise ValueError("--mtmc-w-app cannot be negative")
+
+    homographies = load_homography_bindings(
+        config.homographies,
+        expected_sources=range(len(config.uris)),
+        image_width=config.mux_width,
+        image_height=config.mux_height,
+    )
+    return MtmcSetup(
+        config=MtmcConfig(
+            z_gate=config.mtmc_z_gate,
+            min_affinity=config.mtmc_min_affinity,
+            reassign_interval=config.mtmc_reassign_interval,
+            sync_bucket_ns=round(config.mtmc_sync_bucket_ms * 1_000_000),
+            max_skew_ns=round(config.mtmc_max_skew_ms * 1_000_000),
+            w_app=config.mtmc_w_app if config.mtmc_appearance else 0.0,
+        ),
+        homographies=homographies,
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
@@ -46,7 +260,7 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
     parser.add_argument("--output-dir", default=".", dest="output_dir", help="Directory for per-source CSV files")
     parser.add_argument("--restream-base-port", type=int, default=None, dest="restream_base_port", help="Base port for nvrtspoutsinkbin (stream0=base, stream1=base+1, ...)")
     parser.add_argument("--anonymise", action="store_true", dest="anonymise", help="Enable blur anonymisation")
-    parser.add_argument("--conf-threshold", type=float, default=0.25, dest="conf_threshold", help="Detection confidence threshold (default: 0.25)")
+    parser.add_argument("--conf-threshold", type=float, default=0.18, dest="conf_threshold", help="Detection confidence threshold (default: 0.18)")
     parser.add_argument(
         "--tracker",
         default="configs/tracker_nvdcf.yml",
@@ -57,6 +271,43 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
     parser.add_argument("--perf-interval", type=float, default=5.0, dest="perf_interval", metavar="SECONDS", help="Perf sampling interval in seconds (default: 5.0)")
     parser.add_argument("--duration", type=int, default=None, dest="duration", metavar="SECONDS", help="Auto-stop after SECONDS (for unattended runs)")
     parser.add_argument("--no-sync", action="store_true", dest="no_sync", help="Disable sink sync (unthrottled throughput ceiling measurement)")
+    parser.add_argument("--mtmc", action="store_true", help="Enable cross-camera identity fusion")
+    parser.add_argument(
+        "--homography",
+        action="append",
+        dest="homographies",
+        default=[],
+        metavar="SOURCE_ID=PATH",
+        help="Bind a source ID to a homography artifact (repeat for every source)",
+    )
+    parser.add_argument("--mtmc-z-gate", type=float, default=3.0, dest="mtmc_z_gate")
+    parser.add_argument(
+        "--mtmc-min-affinity", type=float, default=0.5, dest="mtmc_min_affinity"
+    )
+    parser.add_argument(
+        "--mtmc-reassign-interval", type=int, default=10, dest="mtmc_reassign_interval"
+    )
+    parser.add_argument("--mtmc-json", default=None, dest="mtmc_json", metavar="PATH")
+    parser.add_argument("--mtmc-osd-labels", action="store_true", dest="mtmc_osd_labels")
+    parser.add_argument(
+        "--mtmc-sync-bucket-ms", type=float, default=33.0, dest="mtmc_sync_bucket_ms"
+    )
+    parser.add_argument(
+        "--mtmc-max-skew-ms", type=float, default=100.0, dest="mtmc_max_skew_ms"
+    )
+    parser.add_argument(
+        "--mtmc-appearance",
+        action="store_true",
+        dest="mtmc_appearance",
+        help="Enable the optional ReID SGIE appearance cost",
+    )
+    parser.add_argument(
+        "--reid-config",
+        default="configs/nvinfer_reid.txt",
+        dest="reid_config",
+        help="DeepStream secondary ReID inference config",
+    )
+    parser.add_argument("--mtmc-w-app", type=float, default=0.5, dest="mtmc_w_app")
     args = parser.parse_args(argv)
     return MultiStreamConfig(
         uris=args.uris,
@@ -71,6 +322,18 @@ def parse_args(argv: list[str] | None = None) -> MultiStreamConfig:
         perf_interval=args.perf_interval,
         duration=args.duration,
         no_sync=args.no_sync,
+        mtmc=args.mtmc,
+        homographies=args.homographies,
+        mtmc_z_gate=args.mtmc_z_gate,
+        mtmc_min_affinity=args.mtmc_min_affinity,
+        mtmc_reassign_interval=args.mtmc_reassign_interval,
+        mtmc_json=args.mtmc_json,
+        mtmc_osd_labels=args.mtmc_osd_labels,
+        mtmc_sync_bucket_ms=args.mtmc_sync_bucket_ms,
+        mtmc_max_skew_ms=args.mtmc_max_skew_ms,
+        mtmc_appearance=args.mtmc_appearance,
+        reid_config=args.reid_config,
+        mtmc_w_app=args.mtmc_w_app,
     )
 
 
@@ -116,6 +379,53 @@ def _is_file_uri(uri: str) -> bool:
     return not uri.startswith("rtsp://")
 
 
+def rtsp_clock_properties() -> dict[str, object]:
+    """Properties that make RTSP frame metadata use the RTCP-derived NTP clock."""
+    # GstRtspsrcBufferMode.SYNCED is enum value 4; the private enum is not
+    # exported consistently by the Python GI bindings across DS releases.
+    return {"ntp-sync": True, "buffer-mode": 4}
+
+
+def configure_rtsp_clock(source: object, *, pyds_module: object | None = None) -> None:
+    """Configure one RTSP source to expose RTCP-derived NTP frame metadata."""
+    if pyds_module is None:
+        import pyds as pyds_module
+
+    for property_name, value in rtsp_clock_properties().items():
+        source.set_property(property_name, value)
+    pyds_module.configure_source_for_ntp_sync(hash(source))
+
+
+def mux_timing_properties(uris: list[str]) -> dict[str, object]:
+    """Return mux timing properties suitable for live or 2 fps file inputs."""
+    is_live = any(not _is_file_uri(uri) for uri in uris)
+    if is_live:
+        return {
+            "live-source": 1,
+            "attach-sys-ts": 0,
+            "batched-push-timeout": 40_000,
+        }
+    return {"live-source": 0, "batched-push-timeout": 500_000}
+
+
+def format_mtmc_osd_label(class_label: str, *, object_id: int, global_id: int) -> str:
+    """Format an OSD label without obscuring the source-local tracker identity."""
+    return f"{class_label} local={object_id} global={global_id}"
+
+
+def attach_mtmc_probe(
+    pipeline,
+    *,
+    probe_type,
+    callback,
+    appearance_enabled: bool = False,
+) -> None:
+    """Attach MTMC after its final shared inference element and before demux."""
+    element_name = "reid" if appearance_enabled else "tracker"
+    source_pad = pipeline.get_by_name(element_name).get_static_pad("src")
+    source_pad.add_probe(probe_type, callback, 0)
+
+
 def _make_file_source_bin(pipeline, config: MultiStreamConfig, idx: int):
     """Build filesrc→qtdemux→h264parse→decoder→queue for one MP4 file.
 
@@ -127,8 +437,7 @@ def _make_file_source_bin(pipeline, config: MultiStreamConfig, idx: int):
     from gi.repository import Gst
 
     path = config.uris[idx]
-    if path.startswith("file://"):
-        path = path[len("file://"):]
+    path = path.removeprefix("file://")
 
     source = Gst.ElementFactory.make("filesrc", f"source_{idx}")
     demux = Gst.ElementFactory.make("qtdemux", f"qtdemux_{idx}")
@@ -165,7 +474,13 @@ def _make_file_source_bin(pipeline, config: MultiStreamConfig, idx: int):
     return queue
 
 
-def _make_source_bin(pipeline, config: MultiStreamConfig, idx: int):
+def _make_source_bin(
+    pipeline,
+    config: MultiStreamConfig,
+    idx: int,
+    *,
+    on_stream_reconnect: Callable[[int], None] | None = None,
+):
     """Build a source bin and return its queue element.
 
     Dispatches to a file branch for local MP4s (GT-aligned eval) or an rtsp
@@ -195,27 +510,61 @@ def _make_source_bin(pipeline, config: MultiStreamConfig, idx: int):
     source.set_property("protocols", 4)
     source.set_property("retry", config.retry)
     source.set_property("timeout", config.timeout_us)
+    configure_rtsp_clock(source)
 
     depay.link(decoder)
     decoder.link(queue)
 
+    reconnect_detector = StreamReconnectDetector()
+    active_pad_name = None
+
     def _on_pad_added(src, new_pad, _depay=depay, _idx=idx):
+        nonlocal active_pad_name
         sink_pad = _depay.get_static_pad("sink")
         if sink_pad.is_linked():
             return
+        caps = new_pad.get_current_caps() or new_pad.query_caps(None)
+        structure = caps.get_structure(0) if caps and caps.get_size() else None
+        if structure is None:
+            return
+        media = structure.get_string("media")
+        if structure.get_name() != "application/x-rtp" or media not in (None, "video"):
+            return
         ret = new_pad.link(sink_pad)
-        if ret not in (Gst.PadLinkReturn.OK, Gst.PadLinkReturn.WAS_LINKED):
-            log_event(_log, logging.WARNING, source_id=_idx, event="stream_reconnect",
-                      detail=f"pad link returned {ret} — likely RTCP, ignoring")
+        if ret == Gst.PadLinkReturn.OK:
+            active_pad_name = new_pad.get_name()
+            if reconnect_detector.connected():
+                log_event(_log, logging.INFO, source_id=_idx, event="stream_reconnect")
+                if on_stream_reconnect is not None:
+                    on_stream_reconnect(_idx)
+        elif ret != Gst.PadLinkReturn.WAS_LINKED:
+            log_event(
+                _log,
+                logging.WARNING,
+                source_id=_idx,
+                event="stream_pad_link_failed",
+                detail=f"pad link returned {ret}",
+            )
+
+    def _on_pad_removed(_src, old_pad):
+        nonlocal active_pad_name
+        if active_pad_name is not None and old_pad.get_name() == active_pad_name:
+            active_pad_name = None
+            reconnect_detector.disconnected()
 
     source.connect("pad-added", _on_pad_added)
+    source.connect("pad-removed", _on_pad_removed)
     return queue
 
 
-def build_pipeline(config: MultiStreamConfig):
+def build_pipeline(
+    config: MultiStreamConfig,
+    *,
+    on_stream_reconnect: Callable[[int], None] | None = None,
+):
     import gi
     gi.require_version("Gst", "1.0")
-    from gi.repository import Gst, GLib  # noqa: F401
+    from gi.repository import GLib, Gst  # noqa: F401
 
     Gst.init(None)
 
@@ -233,14 +582,22 @@ def build_pipeline(config: MultiStreamConfig):
     mux = Gst.ElementFactory.make("nvstreammux", "mux")
     nvinfer = Gst.ElementFactory.make("nvinfer", "nvinfer")
     tracker = Gst.ElementFactory.make("nvtracker", "tracker")
+    reid = (
+        Gst.ElementFactory.make("nvinfer", "reid")
+        if config.mtmc and config.mtmc_appearance
+        else None
+    )
 
     # ── Demux: split batched stream back to per-source buffers ───────────────
     demux = Gst.ElementFactory.make("nvstreamdemux", "demux")
 
-    for name, el in [
+    shared_elements = [
         ("nvstreammux", mux), ("nvinfer", nvinfer), ("nvtracker", tracker),
         ("nvstreamdemux", demux),
-    ]:
+    ]
+    if reid is not None:
+        shared_elements.append(("nvinfer-reid", reid))
+    for name, el in shared_elements:
         if not el:
             raise RuntimeError(f"Could not create GStreamer element: {name}")
         pipeline.add(el)
@@ -248,7 +605,8 @@ def build_pipeline(config: MultiStreamConfig):
     mux.set_property("width", config.mux_width)
     mux.set_property("height", config.mux_height)
     mux.set_property("batch-size", n)
-    mux.set_property("batched-push-timeout", 4_000_000)
+    for property_name, value in mux_timing_properties(config.uris).items():
+        mux.set_property(property_name, value)
 
     nvinfer.set_property("config-file-path", _make_nvinfer_config(config.nvinfer_config, n))
 
@@ -257,12 +615,19 @@ def build_pipeline(config: MultiStreamConfig):
         "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so",
     )
     tracker.set_property("ll-config-file", config.tracker_config)
+    if reid is not None:
+        reid.set_property("config-file-path", config.reid_config)
 
     # ── Source bins → mux ────────────────────────────────────────────────────
     # Each bin is: rtspsrc → rtph264depay → nvv4l2decoder → queue
     # The queue's src pad is linked to mux sink_{i} so all sources feed one mux.
     for i in range(n):
-        queue = _make_source_bin(pipeline, config, i)
+        queue = _make_source_bin(
+            pipeline,
+            config,
+            i,
+            on_stream_reconnect=on_stream_reconnect,
+        )
         mux_sink = mux.request_pad_simple(f"sink_{i}")
         queue_src = queue.get_static_pad("src")
         queue_src.link(mux_sink)
@@ -272,7 +637,11 @@ def build_pipeline(config: MultiStreamConfig):
     # are deliberately downstream of the demux (see below).
     mux.link(nvinfer)
     nvinfer.link(tracker)
-    tracker.link(demux)
+    if reid is None:
+        tracker.link(demux)
+    else:
+        tracker.link(reid)
+        reid.link(demux)
 
     # ── Per-source output branches ────────────────────────────────────────────
     # Each branch replicates the proven single-stream tail:
@@ -332,6 +701,7 @@ def build_pipeline(config: MultiStreamConfig):
 def _parse_frame_detections(frame_meta):
     """Extract detections from a single NvDsFrameMeta (one source's frame)."""
     import pyds
+
     from pipelines.metadata_parser import Detection
 
     detections = []
@@ -352,6 +722,7 @@ def _parse_frame_detections(frame_meta):
             top=rect.top,
             width=rect.width,
             height=rect.height,
+            source_id=int(frame_meta.source_id),
         ))
         try:
             obj_list = obj_list.next
@@ -360,22 +731,71 @@ def _parse_frame_detections(frame_meta):
     return detections
 
 
-def run(config: MultiStreamConfig) -> None:
-    import ctypes
-    import time
-    import gi
-    gi.require_version("Gst", "1.0")
-    from gi.repository import Gst, GLib
+def _apply_mtmc_osd_labels(frame_meta, id_map) -> None:
+    """Read global IDs from the Python snapshot and update display text only."""
     import pyds
 
-    import numpy as np
+    source_id = int(frame_meta.source_id)
+    obj_list = frame_meta.obj_meta_list
+    while obj_list is not None:
+        try:
+            obj_meta = pyds.NvDsObjectMeta.cast(obj_list.data)
+        except StopIteration:
+            break
+        object_id = int(obj_meta.object_id)
+        global_id = id_map.get((source_id, object_id))
+        if global_id is not None:
+            obj_meta.text_params.display_text = format_mtmc_osd_label(
+                str(obj_meta.obj_label),
+                object_id=object_id,
+                global_id=global_id,
+            )
+        try:
+            obj_list = obj_list.next
+        except StopIteration:
+            break
+
+
+def run(config: MultiStreamConfig) -> None:
+    mtmc_setup = prepare_mtmc(config) if config.mtmc else None
+
+    import ctypes
+    import time
+
+    import gi
+    gi.require_version("Gst", "1.0")
     import cv2
+    import numpy as np
+    import pyds
+    from gi.repository import GLib, Gst
+
     from metrics.csv_sink import CsvSink
     from metrics.health_monitor import HealthMonitor
     from metrics.perf_monitor import PerfMonitor, sample_rss_mb, sample_vram_mb
     from pipelines.anonymisation import blur_bboxes
 
-    pipeline = build_pipeline(config)
+    mtmc_runtime = None
+    if mtmc_setup is not None:
+        def _on_mtmc_desync(event):
+            log_event(
+                _log,
+                logging.WARNING,
+                event="mtmc_desync",
+                **dict(event),
+            )
+
+        mtmc_runtime = MtmcRuntime(
+            mtmc_setup.config,
+            expected_sources=range(len(config.uris)),
+            on_desync=_on_mtmc_desync,
+        )
+
+    pipeline = build_pipeline(
+        config,
+        on_stream_reconnect=(
+            mtmc_runtime.bump_generation if mtmc_runtime is not None else None
+        ),
+    )
     loop = GLib.MainLoop()
 
     csv_sinks = {
@@ -386,6 +806,16 @@ def run(config: MultiStreamConfig) -> None:
     n = len(config.uris)
     frame_counts = {i: 0 for i in range(n)}
     health_monitor = HealthMonitor(num_sources=n, expected_fps=25.0)
+    rtsp_clock_gate = (
+        RtspClockGate(expected_sources=set(range(n)))
+        if mtmc_runtime is not None and all(not _is_file_uri(uri) for uri in config.uris)
+        else None
+    )
+    mtmc_receipts = (
+        FrameReceiptLedger(expected_sources=range(n))
+        if mtmc_runtime is not None
+        else None
+    )
 
     # Decode probe on the nvinfer SRC pad — fires once per batched buffer before
     # the tracker. Reads NvDsInferTensorMeta (exposed because output-tensor-meta=1
@@ -482,6 +912,141 @@ def run(config: MultiStreamConfig) -> None:
     nvinfer_src = pipeline.get_by_name("nvinfer").get_static_pad("src")
     nvinfer_src.add_probe(Gst.PadProbeType.BUFFER, _yolo_decode_probe, 0)
 
+    if mtmc_runtime is not None and mtmc_setup is not None:
+        def _mtmc_probe(_pad, info, _user_data):
+            gst_buffer = info.get_buffer()
+            if gst_buffer is None:
+                return Gst.PadProbeReturn.OK
+            batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
+            if batch_meta is None:
+                return Gst.PadProbeReturn.OK
+
+            frame_metas = []
+            frame_meta_list = batch_meta.frame_meta_list
+            while frame_meta_list is not None:
+                try:
+                    frame_meta = pyds.NvDsFrameMeta.cast(frame_meta_list.data)
+                except StopIteration:
+                    break
+                frame_metas.append(frame_meta)
+                try:
+                    frame_meta_list = frame_meta_list.next
+                except StopIteration:
+                    break
+
+            frame_keys = tuple(
+                (int(frame_meta.source_id), int(frame_meta.frame_num))
+                for frame_meta in frame_metas
+            )
+
+            def _record_receipt(receipt):
+                assert mtmc_receipts is not None
+                for source_id, frame_num in mtmc_receipts.record(frame_keys, receipt):
+                    log_event(
+                        _log,
+                        logging.WARNING,
+                        source_id=source_id,
+                        event="mtmc_receipt_overflow",
+                        frame_num=frame_num,
+                    )
+
+            if rtsp_clock_gate is not None:
+                ntp_timestamps = {
+                    int(frame_meta.source_id): int(
+                        getattr(frame_meta, "ntp_timestamp", 0)
+                    )
+                    for frame_meta in frame_metas
+                }
+                clock_batch = rtsp_clock_gate.observe_batch(ntp_timestamps)
+                for source_id in clock_batch.waiting_sources:
+                    log_event(
+                        _log,
+                        logging.INFO,
+                        source_id=source_id,
+                        event="mtmc_clock_wait",
+                        reason="waiting_for_rtcp_sender_report",
+                    )
+                for source_id in clock_batch.ready_sources:
+                    log_event(
+                        _log,
+                        logging.INFO,
+                        source_id=source_id,
+                        event="mtmc_clock_ready",
+                        ntp_timestamp_ns=ntp_timestamps[source_id],
+                    )
+                for source_id in clock_batch.lost_sources:
+                    log_event(
+                        _log,
+                        logging.WARNING,
+                        source_id=source_id,
+                        event="mtmc_desync",
+                        reason="invalid_frame_metadata",
+                        detail="RTSP frame has no valid NTP timestamp after clock readiness",
+                    )
+                for source_id in clock_batch.recovered_sources:
+                    log_event(
+                        _log,
+                        logging.INFO,
+                        source_id=source_id,
+                        event="mtmc_clock_recovered",
+                        ntp_timestamp_ns=ntp_timestamps[source_id],
+                    )
+                if not clock_batch.fuse_batch:
+                    if clock_batch.advance_liveness:
+                        receipt = mtmc_runtime.advance_liveness()
+                    else:
+                        receipt = mtmc_runtime.rejected_receipt()
+                    _record_receipt(receipt)
+                    return Gst.PadProbeReturn.OK
+
+            mtmc_frames = []
+            for frame_meta in frame_metas:
+                source_id = int(frame_meta.source_id)
+                try:
+                    timestamp_ns = frame_timestamp_ns(
+                        frame_num=int(frame_meta.frame_num),
+                        ntp_timestamp=int(getattr(frame_meta, "ntp_timestamp", 0)),
+                        is_rtsp=not _is_file_uri(config.uris[source_id]),
+                    )
+                    detections = _parse_frame_detections(frame_meta)
+                    embeddings = (
+                        extract_frame_reid_embeddings(
+                            frame_meta,
+                            pyds_module=pyds,
+                        )
+                        if config.mtmc_appearance
+                        else None
+                    )
+                    observations = project_person_detections(
+                        timestamp_ns=timestamp_ns,
+                        source_id=source_id,
+                        detections=detections,
+                        homography=mtmc_setup.homographies[source_id],
+                        embeddings=embeddings,
+                    )
+                except (IndexError, KeyError, ValueError) as exc:
+                    log_event(
+                        _log,
+                        logging.WARNING,
+                        source_id=source_id,
+                        event="mtmc_desync",
+                        reason="invalid_frame_metadata",
+                        detail=str(exc),
+                    )
+                else:
+                    mtmc_frames.append(
+                        MtmcFrame(timestamp_ns, source_id, observations)
+                    )
+            _record_receipt(mtmc_runtime.submit_batch(mtmc_frames))
+            return Gst.PadProbeReturn.OK
+
+        attach_mtmc_probe(
+            pipeline,
+            probe_type=Gst.PadProbeType.BUFFER,
+            callback=_mtmc_probe,
+            appearance_enabled=config.mtmc_appearance,
+        )
+
     # One probe per per-branch nvdsosd sink pad — fires before that branch's OSD
     # draws. After the demux each buffer carries a single source's frame, so the
     # surface batch-index is always 0; source_id from the frame meta still tells
@@ -505,6 +1070,40 @@ def run(config: MultiStreamConfig) -> None:
             source_id = frame_meta.source_id
             frame_counts[source_id] = frame_counts.get(source_id, 0) + 1
             detections = _parse_frame_detections(frame_meta)
+            receipt = (
+                mtmc_receipts.consume(int(source_id), int(frame_meta.frame_num))
+                if mtmc_receipts is not None
+                else None
+            )
+            if mtmc_runtime is not None and receipt is None:
+                log_event(
+                    _log,
+                    logging.WARNING,
+                    source_id=source_id,
+                    event="mtmc_receipt_mismatch",
+                    frame_num=int(frame_meta.frame_num),
+                )
+            id_map = receipt.identity_snapshot.id_map if receipt is not None else {}
+            detections = with_global_ids(
+                detections,
+                source_id=source_id,
+                id_map=id_map,
+                generation=(
+                    receipt.identity_snapshot.generations[source_id]
+                    if receipt is not None
+                    else (-1 if mtmc_runtime is not None else 0)
+                ),
+                association_bucket=(
+                    receipt.association_bucket if receipt is not None else None
+                ),
+                association_accepted=(
+                    receipt.association_accepted
+                    if receipt is not None
+                    else mtmc_runtime is None
+                ),
+            )
+            if mtmc_runtime is not None and config.mtmc_osd_labels:
+                _apply_mtmc_osd_labels(frame_meta, id_map)
             health_monitor.record_frame(source_id, t=time.monotonic(), has_detection=bool(detections))
 
             # Optional: blur bboxes in-place on the NVMM surface before OSD draws
@@ -603,8 +1202,12 @@ def run(config: MultiStreamConfig) -> None:
     signal.signal(signal.SIGINT, _on_sigint)
     signal.signal(signal.SIGTERM, _on_sigint)
 
+    if mtmc_runtime is not None:
+        mtmc_runtime.start()
     ret = pipeline.set_state(Gst.State.PLAYING)
     if ret == Gst.StateChangeReturn.FAILURE:
+        if mtmc_runtime is not None:
+            mtmc_runtime.shutdown(json_path=config.mtmc_json)
         raise RuntimeError("Failed to set pipeline to PLAYING")
 
     log_event(_log, logging.INFO, event="pipeline_start",
@@ -615,6 +1218,8 @@ def run(config: MultiStreamConfig) -> None:
         pipeline.set_state(Gst.State.NULL)
         for sink in csv_sinks.values():
             sink.close()
+        if mtmc_runtime is not None:
+            mtmc_runtime.shutdown(json_path=config.mtmc_json)
         if perf_monitor is not None and config.perf_json:
             # Flush a final sample so short runs (EOS before first tick) have data
             now = time.time()

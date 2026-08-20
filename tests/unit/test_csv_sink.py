@@ -4,12 +4,23 @@ from metrics.csv_sink import CsvSink
 from pipelines.metadata_parser import Detection
 
 HEADER = ["frame_num", "object_id", "class_id", "class_label",
-          "confidence", "left", "top", "width", "height"]
+          "confidence", "left", "top", "width", "height",
+          "source_id", "global_id", "generation", "association_bucket",
+          "association_accepted"]
 
 
 def _det(**kwargs) -> Detection:
-    defaults = dict(frame_num=0, object_id=1, class_id=0, class_label="car",
-                    confidence=0.9, left=10.0, top=20.0, width=100.0, height=50.0)
+    defaults = {
+        "frame_num": 0,
+        "object_id": 1,
+        "class_id": 0,
+        "class_label": "car",
+        "confidence": 0.9,
+        "left": 10.0,
+        "top": 20.0,
+        "width": 100.0,
+        "height": 50.0,
+    }
     defaults.update(kwargs)
     return Detection(**defaults)
 
@@ -43,6 +54,44 @@ def test_write_field_values(tmp_path):
     assert int(r["object_id"]) == 3
     assert r["class_label"] == "person"
     assert float(r["confidence"]) == 0.75
+
+
+def test_write_appends_source_and_global_identity(tmp_path):
+    path = tmp_path / "out.csv"
+    sink = CsvSink(path)
+    sink.write([
+        _det(
+            source_id=2,
+            global_id=41,
+            generation=3,
+            association_bucket=17,
+            association_accepted=False,
+        )
+    ])
+    sink.close()
+
+    row = next(csv.DictReader(path.open()))
+
+    assert int(row["source_id"]) == 2
+    assert int(row["global_id"]) == 41
+    assert int(row["generation"]) == 3
+    assert int(row["association_bucket"]) == 17
+    assert int(row["association_accepted"]) == 0
+
+
+def test_write_uses_legacy_safe_identity_defaults(tmp_path):
+    path = tmp_path / "out.csv"
+    sink = CsvSink(path)
+    sink.write([_det()])
+    sink.close()
+
+    row = next(csv.DictReader(path.open()))
+
+    assert int(row["source_id"]) == -1
+    assert int(row["global_id"]) == -1
+    assert int(row["generation"]) == 0
+    assert row["association_bucket"] == ""
+    assert int(row["association_accepted"]) == 1
 
 
 def test_write_flushes_without_explicit_close(tmp_path):

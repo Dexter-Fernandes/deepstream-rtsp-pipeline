@@ -78,7 +78,7 @@
 - [x] Update `configs/nvinfer_primary.txt`: YOLO26n FP16 engine (`yolo26n_fp16_b3.engine`), 80 COCO classes, cluster-mode removed (NMS baked into model)
 - [x] YOLO26n re-exported with `dynamic=True`; engines rebuilt with `max_batch=3` (`--minShapes/--optShapes/--maxShapes`); supports batch 1–3 in a single engine file; 3 new convert tests (77 total)
 - [x] Confirm detections appear correctly on MOT17-04 stream (visual check ✓ — boxes on all three RTSP output streams)
-- [x] `--conf-threshold` CLI flag wired through `MultiStreamConfig` to `parse_yolo26_output()` (default 0.25)
+- [x] `--conf-threshold` CLI flag wired through `MultiStreamConfig` to `parse_yolo26_output()` (default 0.18)
 
 ### M2.3 — C++ Decode Plugin (Part 1) ✓
 - [x] Scaffold `plugins/yolo26_decode/` with `CMakeLists.txt` (SM 75 / GTX 1660 Ti target)
@@ -215,6 +215,99 @@
 - [ ] Add `cap_add: [SYS_ADMIN]` to a dedicated profiling service in `docker-compose.yml` (CUDA trace works without it; CPU sampling + `--gpu-metrics-device` need it) — document the trade-off, keep the default `pipeline` service unprivileged
 - [ ] Findings writeup (README section or `metrics/stability.ipynb` cell): where the 7% overhead lands (kernels vs memcpy vs sync), whether the Python probe serialises against GPU work, GPU-idle fraction on the live path; real ms quoted against the 40 ms budget
 - [ ] **Deferrable:** Nsight Compute (`ncu`) kernel deep-dive (occupancy / memory throughput) on the YOLO26n TRT engine + `yolo26_decode` plugin — offline engine profiling, not the live pipeline; blocks nothing
+
+---
+
+## M3.8 — Cross-Camera (MTMC) Person Tracking on WildTrack
+
+> **Why:** `NvMultiObjectTracker` maintains independent state per `source_id`, so the same person receives unrelated IDs in each camera. With `useUniqueID: 0`, numerically equal IDs can also collide across cameras without representing the same person. This milestone adds a global identity layer while keeping the existing single-camera trackers frozen for a valid A/B comparison.
+
+**Exit criteria:** the same person keeps one global ID across the three WildTrack cameras; offline and online association agree on more than 95% of rows after accounting for online warm-up; pooled IDF1 and cross-camera identity precision/recall/F1 are reported; held-out homography error passes the per-camera quality gate; and the design is safe for concurrent RTSP streams with offset clocks, reconnects, and recycled tracker IDs.
+
+**Architecture:** `3× source → nvstreammux → nvinfer (YOLO26n) → nvtracker → optional SGIE (ReID) → MTMC probe → nvstreamdemux → 3× OSD/CSV`. The MTMC probe runs before demux, the only point where one batch contains observations from every camera. The core association library remains free of `pyds`, GStreamer, OpenCV, and SciPy so it can be developed and tested on CPU.
+
+### M3.8.0 — GT-Aligned Evaluation Media
+
+- [x] Add `metrics/make_wildtrack_clips.sh` to encode each labelled WildTrack PNG sequence at 2 fps with deterministic all-intra H.264 (`-g 1`)
+- [x] Preserve the exact mapping `clip frame N ↔ annotation stem N*5`; do not infer an unverified offset into the existing five-minute camera clips
+- [x] Verify all three generated clips contain exactly 401 frames with `ffprobe -count_frames`
+
+### M3.8.1 — WildTrack Identity + Ground-Plane Utilities
+
+- [x] Extend `metrics/wildtrack_gt.py` with opt-in identity parsing so the existing annotation dictionary contract remains backward-compatible
+- [x] Add `decode_position_id()`, `frame_index_from_stem()`, `load_wildtrack_mtmc_gt()`, and `to_mot_rows()`; bind camera names to source IDs explicitly
+- [x] Add `pipelines/ground_plane.py`: foot-point extraction, homography projection, analytic projection Jacobian, uncertainty propagation, and truncation-aware foot reliability
+- [x] Scale foot-point pixel uncertainty with box height; for top-truncated boxes, fall back to width-derived height; reject bottom- and horizontally-truncated boxes
+- [x] Cover all helpers with CPU-only unit tests, including the top-truncation fallback and unreliable-foot rejection rules
+
+### M3.8.2 — Homography Fit + Quality Gate
+
+- [x] Add `metrics/fit_homography.py` CLI following the existing argparse/tqdm/JSON/W&B conventions
+- [x] Fit image-pixel-to-world-metre homographies from WildTrack foot points and decoded `position id` coordinates
+- [x] Split train/holdout data by frame, never by box, and regression-test that the frame sets are disjoint
+- [x] Write `configs/homography_C1.json`, `configs/homography_C2.json`, and `configs/homography_C3.json` with model type and full fit provenance
+- [x] Gate each camera at held-out median error `< 0.10 m` and p90 error `< 0.30 m`; document C2's expected lower inlier ratio
+
+### M3.8.3 — Pure MTMC Association Core
+
+- [x] Add `pipelines/mtmc.py` with `GroundObservation`, `MtmcConfig`, `MtmcFuser`, and `fuse_offline()`
+- [x] Key tracklets by `(source_id, generation, object_id)` so a reconnect cannot bind a recycled tracker ID to stale identity state
+- [x] Assemble observations by explicit nanosecond timestamp buckets; never treat per-source `frame_num` as a shared RTSP clock
+- [x] Accumulate pairwise support and co-occurrence using uncertainty-normalised geometry, an absolute distance cap, optional cosine appearance cost, and mutual-nearest-neighbour matching
+- [x] Convert support into affinity only after the configured minimum co-occurrence and support thresholds
+- [x] Cluster tracklets by deterministic constrained union-find; forbid merging temporally overlapping tracklets from the same camera while permitting sequential same-camera fragments when another camera bridges them
+- [x] Preserve ID stickiness across periodic reassignment by inheriting the majority prior global ID, with oldest-ID tie-breaking
+- [x] Publish immutable ID-map snapshots through atomic dictionary rebinding; expire both association state and published entries after the tracklet TTL
+- [x] Test separated and crossing people, same-camera overlap/sequential fragments, insufficient evidence, far-field uncertainty, maximum sigma, determinism, stickiness, immutable snapshots, stale-bucket flushes, and out-of-order/per-source-offset timestamps
+
+### M3.8.4 — Offline Fusion + MTMC Metrics
+
+- [x] Make `metrics.evaluate_tracker.load_predictions()` accept an `id_field` while retaining `object_id` as the default
+- [x] Add `metrics/evaluate_mtmc.py`; validate positional `--pred`, `--camera`, and `--homography` arguments have identical lengths and explicit camera/source binding
+- [x] Implement `--fuse-offline` so geometry/association tuning can reuse tracker CSVs without rerunning the GPU pipeline or trusting an existing `global_id` column
+- [x] Report the primary A/B: per-camera IDF1 using tracker `object_id` versus pooled image-plane IDF1 using shared `global_id`; state that pooled MOTA/MOTP remain detection-weighted camera aggregates
+- [x] Treat `global_id == -1` as a per-track singleton rather than dropping it, so refusal to fuse is penalised
+- [x] Report cross-camera identity precision/recall/F1 over detections matched to GT, plus mean cameras per global ID (GT reference: 2.78) and global-ID count (GT reference: 313)
+- [x] Report ground-plane MODA/MODP at a 0.5 m gate with 1.0 m sensitivity, using a sigma-weighted mean for multi-view predictions
+- [x] Add an optional `min_affinity × z_gate` sweep and persist its results in a W&B table/JSON artifact
+- [x] Complete the CPU-only offline-fusion milestone before modifying the live pipeline
+
+### M3.8.5 — Detection + CSV Identity Contract
+
+- [x] Append defaulted `source_id`, `global_id`, reconnect `generation`, accepted `association_bucket`, and `association_accepted` fields to `Detection`
+- [x] Append matching CSV columns without changing existing column names or ordering; legacy readers default missing generation to `0`, batch identity to `frame_num`, and acceptance to true
+- [x] Keep tracker `object_id` intact for the single-camera baseline; never overwrite DeepStream object IDs with global IDs
+
+### M3.8.6 — Online Pipeline + RTSP Correctness
+
+- [x] Add MTMC only behind `--mtmc`; place its probe on the SGIE source pad, or the tracker source pad when appearance is disabled
+- [x] Add repeatable `--homography SOURCE_ID=PATH` plus `--mtmc-z-gate`, `--mtmc-min-affinity`, `--mtmc-reassign-interval`, `--mtmc-json`, `--mtmc-osd-labels`, `--mtmc-sync-bucket-ms`, and `--mtmc-max-skew-ms`
+- [x] For 2 fps files, derive deterministic timestamps from `frame_num`; for RTSP, use `frame_meta.ntp_timestamp` with `rtspsrc ntp-sync=true`, `buffer-mode=synced`, and mux `attach-sys-ts=0`
+- [x] Refuse unsafe fusion when pairwise observation skew exceeds the configured maximum (default 100 ms) and emit `mtmc_desync` through `log_event`
+- [x] Increment per-source generation on the existing `stream_reconnect` event and evict stale published mappings after TTL expiry
+- [x] Set mux `live-source=1` for RTSP and reduce `batched-push-timeout` from four seconds to approximately one frame interval so one stalled source cannot hold a batch for seconds
+- [x] Read global IDs from the in-process immutable map in downstream CSV/OSD probes; do not use Python `NvDsUserMeta`, `misc_obj_info`, or mutate `obj_meta.object_id`
+- [x] Dump the final authoritative assignment to `--mtmc-json` at shutdown so evaluation can backfill the expected online reassignment warm-up
+- [x] Keep periodic reassignment off the streaming thread on the live path by processing immutable state snapshots in a worker
+
+### M3.8.7 — Optional Appearance via ReID SGIE
+
+- [x] Add `configs/nvinfer_reid.txt` as a secondary inference configuration with tensor metadata enabled and small-object filtering
+- [x] Verify a DeepStream 9.0 sample ReID model is available; register engine generation in `models/convert.py` / `docker/init_models.py` with the existing skip-with-warning behaviour, otherwise export a compact OSNet model
+- [x] L2-normalise per-object embeddings in the MTMC probe and combine cosine appearance distance with geometric cost via `w_app`
+- [x] Set an SGIE interval on the live path so sparse embeddings stay within GTX 1660 Ti compute headroom
+- [x] Measure geometry-only (`w_app = 0`) against tuned appearance and retain the SGIE only if cross-camera metrics justify its cost
+
+### M3.8.8 — Report + End-to-End Verification
+
+- [x] Add `metrics/mtmc_comparison.ipynb` with single-camera versus pooled IDF1, cross-camera identity metrics, ground-plane MODA/MODP, projection error versus image row, and the parameter-sweep surface
+- [x] Run the unmodified tracker on all three GT-aligned clips to establish the single-camera GPU baseline
+- [x] Run offline fusion and tune association on CPU; record the selected configuration and metrics artifact
+- [x] Run online file-input fusion and verify its final JSON assignment agrees with offline fusion on more than 95% of rows, with differences confined to tracklet warm-up
+- [x] Soak the RTSP path qualitatively and confirm a person crossing views retains one global ID without `mtmc_desync` under healthy clock conditions
+- [x] Run `pytest tests/unit -q` and `ruff check .`; keep tracker configs frozen except for comments clarifying that `useUniqueID: 1` provides uniqueness, not cross-camera consistency
+
+**Known risks:** geometry alone can swap people walking together; far-field uncertainty can make association ambiguous; bad homography calibration invalidates every downstream metric; RTSP clock misuse and reconnect ID reuse cause silent identity corruption; Python map publication crosses streaming threads; and WildTrack's single-plane assumption does not generalise to multi-level scenes. Each risk has an explicit gate or regression test above.
 
 ---
 

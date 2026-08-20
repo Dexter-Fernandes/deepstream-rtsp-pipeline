@@ -1,0 +1,209 @@
+{
+  "inputs": [
+    {
+      "source_id": 0,
+      "camera": "C1",
+      "prediction": "/tmp/mtmc-geometry-final-pK0rq8/output_stream0.csv",
+      "homography": "configs/homography_C1.json"
+    },
+    {
+      "source_id": 1,
+      "camera": "C2",
+      "prediction": "/tmp/mtmc-geometry-final-pK0rq8/output_stream1.csv",
+      "homography": "configs/homography_C2.json"
+    },
+    {
+      "source_id": 2,
+      "camera": "C3",
+      "prediction": "/tmp/mtmc-geometry-final-pK0rq8/output_stream2.csv",
+      "homography": "configs/homography_C3.json"
+    }
+  ],
+  "association": {
+    "mode": "offline_fusion",
+    "final_map_override": null,
+    "config": {
+      "z_gate": 3.0,
+      "max_distance_m": 2.0,
+      "max_sigma_m": 1.5,
+      "w_geo": 1.0,
+      "w_app": 0.0,
+      "min_cooccurrence": 5,
+      "min_support": 3,
+      "min_affinity": 0.3,
+      "reassign_interval": 10,
+      "tracklet_ttl": 60,
+      "sync_bucket_ns": 33000000,
+      "max_skew_ns": 100000000
+    }
+  },
+  "metrics": {
+    "image_plane": {
+      "per_camera": {
+        "0": {
+          "MOTA": 0.170293,
+          "MOTP": 0.340786,
+          "IDF1": 0.316986,
+          "num_switches": 490,
+          "num_fragmentations": 537
+        },
+        "1": {
+          "MOTA": 0.184257,
+          "MOTP": 0.337883,
+          "IDF1": 0.302646,
+          "num_switches": 546,
+          "num_fragmentations": 555
+        },
+        "2": {
+          "MOTA": -0.098463,
+          "MOTP": 0.354855,
+          "IDF1": 0.267084,
+          "num_switches": 680,
+          "num_fragmentations": 645
+        }
+      },
+      "pooled": {
+        "MOTA": -0.024046,
+        "MOTP": 0.343626,
+        "IDF1": 0.244635,
+        "num_switches": 4578,
+        "num_fragmentations": 5416
+      },
+      "pooled_mota_motp_note": "Pooled MOTA/MOTP remain detection-weighted camera aggregates; only identity metrics, switches, and fragmentations gain cross-camera meaning."
+    },
+    "cross_camera": {
+      "xcam_tp": 916,
+      "xcam_fp": 452,
+      "xcam_fn": 2343,
+      "xcam_precision": 0.6695906432748538,
+      "xcam_recall": 0.28106781221233507,
+      "xcam_f1": 0.3959368921547439,
+      "mean_cameras_per_global_id": 1.1344667697063369,
+      "n_global_ids": 647,
+      "gt_reference": {
+        "mean_cameras_per_global_id": 2.78,
+        "n_global_ids": 313
+      }
+    },
+    "ground_plane": {
+      "0.5m": {
+        "gate_m": 0.5,
+        "tp": 4982,
+        "fp": 7319,
+        "fn": 4536,
+        "precision": 0.4050077229493537,
+        "recall": 0.5234292918680395,
+        "MODA": -0.2455347762134903,
+        "MODP": 0.55754837786219,
+        "mean_distance_m": 0.221225811068905,
+        "ground_IDF1": 0.26289,
+        "ground_MOTA": -0.38548
+      },
+      "1m": {
+        "gate_m": 1.0,
+        "tp": 6167,
+        "fp": 6134,
+        "fn": 3351,
+        "precision": 0.501341354361434,
+        "recall": 0.6479302374448414,
+        "MODA": 0.003467114940113425,
+        "MODP": 0.6748729568415789,
+        "mean_distance_m": 0.325127043158421,
+        "ground_IDF1": 0.330354,
+        "ground_MOTA": -0.168943
+      }
+    }
+  },
+  "sweep": [
+    {
+      "min_affinity": 0.3,
+      "z_gate": 2.0,
+      "pooled_IDF1": 0.244635,
+      "xcam_precision": 0.6695906432748538,
+      "xcam_recall": 0.28106781221233507,
+      "xcam_f1": 0.3959368921547439,
+      "ground_MODA": -0.2455347762134903,
+      "ground_MODP": 0.55754837786219
+    },
+    {
+      "min_affinity": 0.3,
+      "z_gate": 3.0,
+      "pooled_IDF1": 0.244635,
+      "xcam_precision": 0.6695906432748538,
+      "xcam_recall": 0.28106781221233507,
+      "xcam_f1": 0.3959368921547439,
+      "ground_MODA": -0.2455347762134903,
+      "ground_MODP": 0.55754837786219
+    },
+    {
+      "min_affinity": 0.3,
+      "z_gate": 4.0,
+      "pooled_IDF1": 0.244635,
+      "xcam_precision": 0.6695906432748538,
+      "xcam_recall": 0.28106781221233507,
+      "xcam_f1": 0.3959368921547439,
+      "ground_MODA": -0.2455347762134903,
+      "ground_MODP": 0.55754837786219
+    },
+    {
+      "min_affinity": 0.5,
+      "z_gate": 2.0,
+      "pooled_IDF1": 0.240814,
+      "xcam_precision": 0.7281910009182736,
+      "xcam_recall": 0.2433261736729058,
+      "xcam_f1": 0.3647654093836246,
+      "ground_MODA": -0.2461651607480564,
+      "ground_MODP": 0.5605675801268316
+    },
+    {
+      "min_affinity": 0.5,
+      "z_gate": 3.0,
+      "pooled_IDF1": 0.240814,
+      "xcam_precision": 0.7281910009182736,
+      "xcam_recall": 0.2433261736729058,
+      "xcam_f1": 0.3647654093836246,
+      "ground_MODA": -0.2461651607480564,
+      "ground_MODP": 0.5605675801268316
+    },
+    {
+      "min_affinity": 0.5,
+      "z_gate": 4.0,
+      "pooled_IDF1": 0.240814,
+      "xcam_precision": 0.7281910009182736,
+      "xcam_recall": 0.2433261736729058,
+      "xcam_f1": 0.3647654093836246,
+      "ground_MODA": -0.2461651607480564,
+      "ground_MODP": 0.5605675801268316
+    },
+    {
+      "min_affinity": 0.7,
+      "z_gate": 2.0,
+      "pooled_IDF1": 0.237308,
+      "xcam_precision": 0.8087855297157622,
+      "xcam_recall": 0.19208346118441239,
+      "xcam_f1": 0.31043887924621866,
+      "ground_MODA": -0.2586677873502836,
+      "ground_MODP": 0.5601285043399459
+    },
+    {
+      "min_affinity": 0.7,
+      "z_gate": 3.0,
+      "pooled_IDF1": 0.237308,
+      "xcam_precision": 0.8087855297157622,
+      "xcam_recall": 0.19208346118441239,
+      "xcam_f1": 0.31043887924621866,
+      "ground_MODA": -0.2586677873502836,
+      "ground_MODP": 0.5601285043399459
+    },
+    {
+      "min_affinity": 0.7,
+      "z_gate": 4.0,
+      "pooled_IDF1": 0.237308,
+      "xcam_precision": 0.8087855297157622,
+      "xcam_recall": 0.19208346118441239,
+      "xcam_f1": 0.31043887924621866,
+      "ground_MODA": -0.2586677873502836,
+      "ground_MODP": 0.5601285043399459
+    }
+  ]
+}
