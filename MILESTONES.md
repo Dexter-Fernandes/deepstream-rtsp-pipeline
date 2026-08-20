@@ -242,11 +242,11 @@
 
 ### M3.8.2 — Homography Fit + Quality Gate
 
-- [ ] Add `metrics/fit_homography.py` CLI following the existing argparse/tqdm/JSON/W&B conventions
-- [ ] Fit image-pixel-to-world-metre homographies from WildTrack foot points and decoded `position id` coordinates
-- [ ] Split train/holdout data by frame, never by box, and regression-test that the frame sets are disjoint
-- [ ] Write `configs/homography_C1.json`, `configs/homography_C2.json`, and `configs/homography_C3.json` with model type and full fit provenance
-- [ ] Gate each camera at held-out median error `< 0.10 m` and p90 error `< 0.30 m`; document C2's expected lower inlier ratio
+- [x] Add `metrics/fit_homography.py` CLI following the existing argparse/tqdm/JSON/W&B conventions
+- [x] Fit image-pixel-to-world-metre homographies from WildTrack foot points and decoded `position id` coordinates
+- [x] Split train/holdout data by frame, never by box, and regression-test that the frame sets are disjoint
+- [x] Write `configs/homography_C1.json`, `configs/homography_C2.json`, and `configs/homography_C3.json` with model type and full fit provenance
+- [x] Gate each camera at held-out median error `< 0.10 m` and p90 error `< 0.30 m`; document C2's expected lower inlier ratio
 
 ### M3.8.3 — Pure MTMC Association Core
 
