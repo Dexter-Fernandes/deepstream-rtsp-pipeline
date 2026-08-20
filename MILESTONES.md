@@ -311,6 +311,52 @@
 
 ---
 
+## M4 — README Presentation Redesign
+
+> **Why:** the README currently leads with implementation detail (`IPluginV2DynamicExt`, `NvDsObjectMeta`, `network-type=100`, `pyds` all appear within the first ~35 lines) before any result, and has no hero visual or consolidated results summary — the strongest outcomes (29.7 FPS live × 3 streams, 1.52× FP16 speedup at ~99% accuracy retention, cross-camera MTMC fusion) are buried in the 5th of 10 sections. This milestone reorders the presentation into a **10-second recruiter → 60-second engineering manager → technical deep dive** hierarchy without discarding any existing technical depth or introducing unverified claims.
+>
+> **Dataset attribution note (do not treat as a blanket rule):** the live pipeline / throughput / stability numbers are genuinely measured against **WildTrack** Cam1–3 (README's mediamtx source), and the M3.8 cross-camera/MTMC results are WildTrack-based. But the FP16/FP32 accuracy validation and the MOTA/IDF1 tracker comparison are genuinely **MOT17-04-SDP**-based (`metrics/results/accuracy.json`, `metrics/evaluate_tracker.py`), used specifically because MOT17 has the ground-truth annotations that GT-aligned accuracy/MOTA scoring needs. This split is correct as currently documented — M4 states it explicitly rather than re-labelling everything as WildTrack.
+
+**Exit criteria:** the README's first screen (title, one-sentence value proposition, hero demo, results table) communicates what the project achieves and why it matters without requiring GStreamer/TensorRT familiarity; every benchmark claim is traceable to a repository artefact and correctly scoped to its actual evaluation source (WildTrack live/throughput/stability/cross-camera vs MOT17 GT-aligned accuracy/tracker); measured results are visually distinguished from projections; the full existing technical depth (architecture, tracker evaluation, latency-tail analysis, stability, observability, testing, quick start, roadmap) is preserved below the fold.
+
+### M4.0 — Dataset Attribution & Fact Corrections
+- [ ] Add a concise "Benchmark source" statement near the top of the README stating the real split: WildTrack Cam1–3 for live/throughput/stability/cross-camera-MTMC results, MOT17-04-SDP for GT-aligned FP16/FP32 accuracy validation and single-camera tracker MOTA/IDF1 — not a single blanket dataset claim
+- [ ] Correct the stale "221 CPU-safe unit tests" figure (README.md:10) to the current count (386 across `tests/unit/` as of this milestone; re-verify at execution time since the count will keep climbing)
+- [ ] Sweep README for any other numbers that drifted from `metrics/results/*.json` since last written (test counts, FPS, latency, VRAM) and correct in place — do not regenerate or rerun benchmarks
+
+### M4.1 — Hero Demo Asset
+- [ ] Confirm whether an already-processed (detection boxes + persistent tracking IDs + anonymisation) three-stream WildTrack output recording exists; if not, run the live pipeline against a WildTrack source triplet (`data/wildtrack_c1_gt.mp4` / `c2_gt.mp4` / `c3_gt.mp4`, or `data/c1_5min.mp4` / `c2_5min.mp4` / `c3_5min.mp4`) to produce one, with `CAM 01`/`CAM 02`/`CAM 03` labels visible and no unthrottled/fabricated FPS overlay burned in
+- [ ] Write `tools/make_readme_demo.sh` (ffmpeg-based, no hard-coded machine-specific paths): tile three streams, trim to a representative ~10–15 s section, scale for README width, palette-based GIF export
+- [ ] Generate `docs/assets/pipeline-demo.gif` (README hero) and optionally a higher-quality `docs/assets/pipeline-demo.mp4`; confirm the GIF loops cleanly, reads at normal README width, and stays a reasonable file size
+- [ ] Check WildTrack's licence/distribution terms before committing footage to the public repo; if redistribution is questionable, document the regeneration workflow instead of embedding video and flag the concern explicitly rather than silently omitting or including it
+
+### M4.2 — Opening & Results at a Glance
+- [ ] Rewrite the README opening to lead with a one-sentence outcome statement before any low-level term (`IPluginV2DynamicExt`, `NvDsObjectMeta`, `NVMM`, `network-type=100`, `pyds`, tensor-metadata internals, probe implementation details all move below the fold)
+- [ ] Insert the hero demo (`docs/assets/pipeline-demo.gif`) directly below the opening statement, with a caption distinguishing representative footage from the specific measured benchmark run if they aren't the same recording
+- [ ] Add a "Results at a glance" table immediately below the hero, using only figures already verified elsewhere in the README/`metrics/results/` (live multi-stream FPS, FP16 speedup + accuracy retention, full-graph overhead, batch/p99 ceiling, current test count)
+- [ ] Embed one benchmark chart (`metrics/results/multi_stream_throughput.png`, or a clearer alternative from the existing plot set) directly below the table with a plain-English caption; do not stack multiple charts at the top
+
+### M4.3 — What I Built + Engineering Decisions
+- [ ] Add a ~5-bullet "What I built" section scannable by a non-technical reader (multi-stream ingestion, YOLO26n + TensorRT FP16, tracker benchmarking, custom decode plugin, production-oriented reliability/testing)
+- [ ] Convert the FP32→FP16 comparison table into an "Engineering decisions & trade-offs" narrative (decision / measured result / trade-off / practical implication) covering the ~1.52× speedup, ~99% box match / mean IoU, and explicitly noting the GTX 1660 Ti has **no Tensor Cores** so the gain is bandwidth-driven, not compute-driven (README already states this — carry it forward, don't drop it)
+- [ ] In the same section, distinguish runtime VRAM from TensorRT engine/storage size from OTA/fleet deployment footprint; retain any existing OTA fleet-size calculation but label it explicitly as a projection
+
+### M4.4 — Tracker & Cross-Camera Framing
+- [ ] Add a short product-decision summary above the existing MOT17-04 tracker table (identity continuity vs stability vs compute cost — which tracker wins on which axis), keeping the terminology already used in `configs/tracker_*.yml` (IOU / NvDCF / ByteTrack-inspired NvSORT) and the existing detector-recall caveat on absolute MOTA
+- [ ] Keep the existing WildTrack cross-camera/MTMC table (pooled IDF1, cross-camera P/R/F1, ground-plane MODA/MODP) clearly separated from the single-camera tracker story, explicitly labelled as WildTrack-evaluated
+- [ ] Label any fleet/camera-count extrapolation (e.g. 5,000-camera sizing) as a "Capacity projection" wherever it appears in prose, distinct from measured 15-stream/batch figures, with the arithmetic double-checked
+
+### M4.5 — Architecture Intro + Reproducibility
+- [ ] Add a one-paragraph plain-English description before the existing GStreamer/architecture diagram (three sources decoded → batched for GPU inference → tracked → demuxed to independent output streams with anonymisation and metadata logging)
+- [ ] Add a reproducibility statement linking to the backing artefacts (`metrics/benchmark_engines.sh`, `metrics/batch_bench.sh`, `metrics/stability_run.sh`, `metrics/throughput_run.sh`, `metrics/decode_comparison.ipynb`, `metrics/tracker_comparison.ipynb`, `metrics/stability.ipynb`, `metrics/mtmc_comparison.ipynb`, `metrics/results/*.json`)
+- [ ] Reorder the remaining existing sections (quick start, tests, roadmap, known gaps, privacy) into the recruiter → engineering-manager → deep-dive hierarchy without deleting or shortening existing technical content
+
+### M4.6 — Final Review
+- [ ] Re-read the rendered README end-to-end: confirm the first screen explains the project in ~10 seconds, no dataset attribution is misrepresented, no fabricated live overlay was introduced, measured and projected figures are visually distinct, and all relative links/image paths resolve
+- [ ] Confirm generated GIF/MP4 file sizes are reasonable for a GitHub README and are not committed alongside the large raw source videos in `data/`
+
+---
+
 ## Stretch Goals (post M3)
 
 - [ ] Grafana dashboard wired to CSV/InfluxDB output
