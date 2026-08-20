@@ -2,12 +2,14 @@
 
 NVIDIA DeepStream pipeline running three concurrent RTSP streams through GPU-accelerated inference, object tracking, and per-source CSV metadata output — built on a GTX 1660Ti (6 GB VRAM) with a full TDD test suite.
 
+> **Benchmark source:** live pipeline, throughput, stability, and cross-camera MTMC results are measured on WildTrack Cam1–3 (the mediamtx-served source). FP16/FP32 accuracy validation and single-camera tracker MOTA/IDF1 are measured on MOT17-04-SDP, used specifically because it has the dense per-frame ground truth the accuracy/MOTA scoring needs. See [Benchmark results](#benchmark-results) for which table uses which.
+
 ## What this demonstrates
 
 - Three RTSP sources batched through a single `nvstreammux`, demuxed back per-source for independent OSD and restream output
 - YOLO26n FP16 running end-to-end: `.pt → ONNX (dynamic batch) → TRT FP16` via `trtexec`; Python tensor-meta probe decodes `[300, 6]` output and populates `NvDsObjectMeta` without a compiled C parser
 - `IPluginV2DynamicExt` CUDA kernel appended to the TRT network via TRT Python API; converts xyxy→xywh on GPU inside TRT, replacing the Python coordinate-transform loop; `metrics/profile_decode.py` isolates per-layer latency via `IProfiler`
-- 221 CPU-safe unit tests written before implementation (red→green); no GPU required for the test suite
+- 393 CPU-safe unit tests written before implementation (red→green); no GPU required for the test suite
 - Gaussian blur applied to every detected bbox region before `nvdsosd` renders or any output leaves the pipeline
 - FP32 vs FP16 vs FP16+decode-plugin compared on latency, VRAM, engine size, and fleet OTA cost; batch sweep 1–100 against a 25 fps real-time budget with fleet-sizing projections (`metrics/decode_comparison.ipynb`)
 - Per-frame CSV sink; mediamtx-served Wildtrack Cam1–3 (5-min 1080p60 clips, TCP RTSP) as the live source; MOT17-04 played via a file-source branch for GT-aligned MOTA/IDF1 tracker evaluation
@@ -109,7 +111,7 @@ Add `--mtmc-appearance` to enable the sparse ReID SGIE. The bundled model is pro
 
 ```bash
 pip install pytest
-pytest tests/unit/ -v      # 378 tests, CPU-only, no GPU required
+pytest tests/unit/ -v      # 393 tests, CPU-only, no GPU required
 ```
 
 | Module | Tests | What they cover |
@@ -119,21 +121,22 @@ pytest tests/unit/ -v      # 378 tests, CPU-only, no GPU required
 | `anonymisation` | 6 | Blur applied, pixels outside bbox unchanged, out-of-bounds clip |
 | `frame_accessor` | 4 | NVMM surface accessor with injectable `_get_surface` |
 | `rtsp_pipeline` | 17 | Config defaults, arg parsing, source props, restream URI parsing |
-| `multi_stream` | 50 | Multi-URI parsing, CSV path routing, tracker/perf flags, file and RTSP clocks, RTCP clock acquisition/loss/recovery, frame-bound receipt handoff, ReID placement, reconnects, and OSD labels |
-| `convert` | 14 | `engine_path` naming, `build_trtexec_cmd` flags, dynamic-batch shape profile, `parse_args` |
+| `multi_stream` | 51 | Multi-URI parsing, CSV path routing, tracker/perf flags, file and RTSP clocks, RTCP clock acquisition/loss/recovery, frame-bound receipt handoff, ReID placement, reconnects, and OSD labels |
+| `convert` | 17 | `engine_path` naming, `build_trtexec_cmd` flags, dynamic-batch shape profile, `parse_args` |
 | `export_yolo26` | 3 | `parse_args` for weights path and output-dir |
-| `init_models` | 9 | Skip/run logic for all cold-start and warm-start combinations; decode-engine skip/build paths |
-| `output_parser` | 6 | Threshold filtering, xyxy→xywh conversion, class_id extraction, batch-dim squeeze |
+| `init_models` | 15 | Skip/run logic for all cold-start and warm-start combinations; decode-engine skip/build paths |
+| `output_parser` | 7 | Threshold filtering, xyxy→xywh conversion, class_id extraction, batch-dim squeeze |
 | `decode_engine` | 5 | `decode_engine_path` naming, `parse_args` defaults and flags |
 | `validate_accuracy` | 20 | `box_iou`, greedy IoU matching, per-engine comparison, per-coord decode delta, `preprocess_frame` shape/dtype/range |
 | `profile_decode` | 10 | `_parse_tail_latencies` (min/median/p99/max from trtexec output), `budget_check` (mean+p99 vs frame budget), `_SimpleProfiler.to_dict` tail fields |
-| `evaluate_tracker` | 17 | GT loading (visibility filter), prediction loading (frame-offset), `MOTAccumulator` build, MOTA/MOTP/IDF1 compute, unique-track count |
+| `evaluate_tracker` | 19 | GT loading (visibility filter), prediction loading (frame-offset), `MOTAccumulator` build, MOTA/MOTP/IDF1 compute, unique-track count |
+| `sweep_conf_threshold` | 11 | Precision/recall/F1 at a threshold, threshold sweep + best-F1 selection, average precision — the offline sweep behind the default `--conf-threshold 0.18` |
 | `perf_monitor` | 21 | `compute_interval_fps`, `PerfMonitor.record/summary` (FPS, VRAM, RSS, leak heuristic), `to_dict`/`write_json` round-trip, `sample_rss_mb`, `sample_vram_mb` |
 | `model_gate` | 19 | `match_rate ≥ 0.95` AND `mean_iou ≥ 0.95` gate checks, signed manifest (SHA-256 + timestamp), exit 0/1 for CI |
 | `structured_log` | 8 | JSON formatter, required fields (`ts`/`logger`/`level`/`event`), optional `source_id`, arbitrary extra fields, idempotent `configure_pipeline_logging` |
 | `health_monitor` | 12 | Per-source liveness window, `is_live` flag, rolling FPS, `fps_vs_expected` ratio, `time_since_last_detection_s`, system dict, never-seen-source defaults |
-| WildTrack / ground plane / homography | 36 | GT identity loading, frame-aligned clip validation, foot-point reliability and uncertainty, projection Jacobians, held-out homography fitting, and calibration quality gates |
-| MTMC / runtime / evaluator | 81 | Synchronised association, constrained clustering, reconnect generations, frame-bound runtime/CSV receipts, TTL/liveness eviction, authoritative history, rejected-evidence filtering, batch-parity agreement, and image/cross-camera/ground metrics |
+| WildTrack / ground plane / homography | 37 | GT identity loading, frame-aligned clip validation, foot-point reliability and uncertainty, projection Jacobians, held-out homography fitting, and calibration quality gates |
+| MTMC / runtime / evaluator | 82 | Synchronised association, constrained clustering, reconnect generations, frame-bound runtime/CSV receipts, TTL/liveness eviction, authoritative history, rejected-evidence filtering, batch-parity agreement, and image/cross-camera/ground metrics |
 | ReID | 13 | Tensor-contract validation, L2-normalised embedding extraction, SGIE configuration, sparse feature caching, and geometry-only fallback |
 
 GPU smoke tests: `pytest --gpu` (`tests/smoke/` — requires GPU runner; auto-skipped in CI).
@@ -183,10 +186,10 @@ Multi-stream batch sweep (FP16, single `nvstreammux` batch):
 | Scenario | FPS / stream | Notes |
 |---|---|---|
 | `trtexec` batch=3 (bare TRT kernel) | **140.9** | Pure inference, no graph overhead |
-| Unthrottled 3× file source | **131.3** | Full graph, `sync=false`; 7% overhead vs bare kernel |
+| Unthrottled 3× file source | **129.4** | Full graph, `sync=false`; 8% overhead vs bare kernel |
 | Live 3-stream RTSP (30 min, `-re` cap) | **29.7** | Exceeds 25 fps floor; 4.4× headroom vs ceiling |
 
-Full-graph overhead vs the bare TRT kernel is **7 %** (131 vs 140.9 fps/stream) — the IOU tracker, OSD, and Python probe are cheap at this batch size; the main cost is GStreamer scheduling. The live pipeline sustains > 25 fps × 3 streams over 30 minutes with a peak VRAM of **1,632 MB** (IOU tracker) and an RSS that *decreased* by 260 MB over the run (DeepStream releasing initialisation caches) — definitively no memory leak. Full analysis and stability charts in `metrics/stability.ipynb`.
+Full-graph overhead vs the bare TRT kernel is **8 %** (129.4 vs 140.9 fps/stream) — the IOU tracker, OSD, and Python probe are cheap at this batch size; the main cost is GStreamer scheduling. The live pipeline sustains > 25 fps × 3 streams over 30 minutes with a peak VRAM of **1,632 MB** (IOU tracker) and an RSS that *decreased* by 260 MB over the run (DeepStream releasing initialisation caches) — definitively no memory leak. Full analysis and stability charts in `metrics/stability.ipynb`.
 
 **Tracker comparison (M3.2)** — three `nvtracker` algorithms evaluated on MOT17-04 ground truth (47,557 GT boxes) via `py-motmetrics`. All three see the identical YOLO26n detection stream so differences isolate the tracker, not the detector. Full analysis in `metrics/tracker_comparison.ipynb`.
 
@@ -227,7 +230,7 @@ YOLO26n FP16 runs end-to-end through DeepStream with a C++ TRT decode plugin. Th
 
 - ✓ **M3.1** — Three tracker configs (IOU / NvDCF / ByteTrack); `--tracker` CLI flag; `probationAge` tuning; tracker CSVs in `metrics/tracker_results/`
 - ✓ **M3.2** — MOTA/MOTP/IDF1 evaluation via `py-motmetrics` on MOT17-04 GT; `metrics/evaluate_tracker.py`; `metrics/tracker_comparison.ipynb` with summary table + bar charts; fixed `bInferDone` / `detector_bbox_info` probe bugs; file-input source branch for GT-aligned eval
-- ✓ **M3.3** — Live end-to-end FPS (131 fps unthrottled / 29.7 fps live) + 30-min stability run; `metrics/perf_monitor.py` (21 CPU-safe tests); `--perf-json / --duration / --no-sync` flags; `metrics/stability.ipynb`
+- ✓ **M3.3** — Live end-to-end FPS (129.4 fps unthrottled / 29.7 fps live) + 30-min stability run; `metrics/perf_monitor.py` (21 CPU-safe tests); `--perf-json / --duration / --no-sync` flags; `metrics/stability.ipynb`
 - ✓ **M3.4** — GPU smoke tests (`tests/smoke/`); motmetrics integration test; GitHub Actions unit-test workflow; model-promotion gate (`metrics/model_gate.py`, 19 CPU-safe tests) with SHA-256 signed manifest and CI exit 0/1
 - ✓ **M3.5** — `docs/jetson-upgrade.md`, `docs/isp-and-camera-input.md`, `docs/system-design.md`; README completeness pass
 - ✓ **M3.8** — WildTrack calibration and GT-aligned clips; CPU MTMC core and evaluator; online atomic mux-batch fusion; optional sparse ReID; 100% online/offline final-map agreement; 300-second RTSP soak; `metrics/mtmc_comparison.ipynb`
