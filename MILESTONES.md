@@ -250,15 +250,15 @@
 
 ### M3.8.3 — Pure MTMC Association Core
 
-- [ ] Add `pipelines/mtmc.py` with `GroundObservation`, `MtmcConfig`, `MtmcFuser`, and `fuse_offline()`
-- [ ] Key tracklets by `(source_id, generation, object_id)` so a reconnect cannot bind a recycled tracker ID to stale identity state
-- [ ] Assemble observations by explicit nanosecond timestamp buckets; never treat per-source `frame_num` as a shared RTSP clock
-- [ ] Accumulate pairwise support and co-occurrence using uncertainty-normalised geometry, an absolute distance cap, optional cosine appearance cost, and mutual-nearest-neighbour matching
-- [ ] Convert support into affinity only after the configured minimum co-occurrence and support thresholds
-- [ ] Cluster tracklets by deterministic constrained union-find; forbid merging temporally overlapping tracklets from the same camera while permitting sequential same-camera fragments when another camera bridges them
-- [ ] Preserve ID stickiness across periodic reassignment by inheriting the majority prior global ID, with oldest-ID tie-breaking
-- [ ] Publish immutable ID-map snapshots through atomic dictionary rebinding; expire both association state and published entries after the tracklet TTL
-- [ ] Test separated and crossing people, same-camera overlap/sequential fragments, insufficient evidence, far-field uncertainty, maximum sigma, determinism, stickiness, immutable snapshots, stale-bucket flushes, and out-of-order/per-source-offset timestamps
+- [x] Add `pipelines/mtmc.py` with `GroundObservation`, `MtmcConfig`, `MtmcFuser`, and `fuse_offline()`
+- [x] Key tracklets by `(source_id, generation, object_id)` so a reconnect cannot bind a recycled tracker ID to stale identity state
+- [x] Assemble observations by explicit nanosecond timestamp buckets; never treat per-source `frame_num` as a shared RTSP clock
+- [x] Accumulate pairwise support and co-occurrence using uncertainty-normalised geometry, an absolute distance cap, optional cosine appearance cost, and mutual-nearest-neighbour matching
+- [x] Convert support into affinity only after the configured minimum co-occurrence and support thresholds
+- [x] Cluster tracklets by deterministic constrained union-find; forbid merging temporally overlapping tracklets from the same camera while permitting sequential same-camera fragments when another camera bridges them
+- [x] Preserve ID stickiness across periodic reassignment by inheriting the majority prior global ID, with oldest-ID tie-breaking
+- [x] Publish immutable ID-map snapshots through atomic dictionary rebinding; expire both association state and published entries after the tracklet TTL
+- [x] Test separated and crossing people, same-camera overlap/sequential fragments, insufficient evidence, far-field uncertainty, maximum sigma, determinism, stickiness, immutable snapshots, stale-bucket flushes, and out-of-order/per-source-offset timestamps
 
 ### M3.8.4 — Offline Fusion + MTMC Metrics
 
