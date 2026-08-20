@@ -188,10 +188,12 @@ def test_build_pipeline_has_no_sync():
 # ---------------------------------------------------------------------------
 
 
-def test_run_uses_configure_pipeline_logging():
+def test_module_calls_configure_pipeline_logging():
+    # Called once at import time (not per-run) so logging is configured
+    # before the module-level plugin-load log line fires.
     import inspect
-    from pipelines.multi_stream import run
-    assert "configure_pipeline_logging" in inspect.getsource(run)
+    import pipelines.multi_stream as multi_stream
+    assert "configure_pipeline_logging()" in inspect.getsource(multi_stream)
 
 
 def test_run_emits_pipeline_start_event():

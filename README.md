@@ -185,7 +185,7 @@ YOLO26n FP16 runs end-to-end through DeepStream with a C++ TRT decode plugin. Th
 - *(in progress)* **M3.6** — Observability / reactive debugging:
   - ✓ Structured JSON logging (`pipelines/structured_log.py`) — `configure_pipeline_logging` / `get_pipeline_logger` / `log_event`; all pipeline `print()` calls replaced with levelled JSON-line records (DEBUG/INFO/WARNING/ERROR) to stderr; 8 CPU-safe tests
   - ✓ Per-sensor health metrics (`metrics/health_monitor.py`) — per-source liveness (configurable window), rolling FPS vs expected, time-since-last-detection; `_health_tick` GLib callback emits a `health_tick` JSON line every interval and a `WARNING source_stalled` for any dead stream; 12 CPU-safe tests
-  - ☐ Failure-mode playbook (`docs/`) — how to diagnose stuck stream, silently-degraded detector, OOM, reconnect-but-no-metadata
+  - ✓ Failure-mode playbook (`docs/failure-mode-playbook.md`) — how to diagnose a stuck stream, a silently-degraded detector (FPS fine but detections wrong, using the real M3.2 `nvtracker` association bug as a worked example), an OOM, and a sensor that reconnects but produces no metadata; grounded in the actual `event` names/fields the pipeline emits
   - ☐ End-to-end debugging walkthrough — inject a fault, show how logs/metrics surface it
 
 ---

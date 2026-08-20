@@ -201,8 +201,20 @@
 > Maps to the JD's "Reactive Debugging and Support" (15% of the role) and "make systems more robust." Nothing else in M1–M3 addresses how you *notice* and *diagnose* a degraded sensor.
 - [x] Structured logging across the pipeline (per-stream source_id, frame counts, FPS, dropped frames, reconnect events) — machine-parseable JSON-line records via `pipelines/structured_log.py`; all `print()` replaced with levelled `log_event()` calls (DEBUG/INFO/WARNING/ERROR); 8 CPU-safe unit tests
 - [x] Per-sensor health metrics: liveness, current FPS vs expected, time-since-last-detection, VRAM/RSS; `metrics/health_monitor.py` — `HealthMonitor` with `record_frame()` probe wiring + `_health_tick()` GLib callback emitting periodic `health_tick` JSON log line and `WARNING source_stalled` for dead streams; 12 CPU-safe unit tests
-- [ ] Failure-mode playbook in `docs/`: how to diagnose a stuck stream, a silently-degraded detector (FPS fine but detections wrong), an OOM, and a sensor that reconnects but produces no metadata
+- [x] Failure-mode playbook in `docs/`: how to diagnose a stuck stream, a silently-degraded detector (FPS fine but detections wrong), an OOM, and a sensor that reconnects but produces no metadata — `docs/failure-mode-playbook.md`, grounded in the actual `event` names/fields from `structured_log.py` and `health_monitor.py` (including the real M3.2 `nvtracker` association bug as a worked example of mode 2)
 - [ ] Demonstrate one debugging walkthrough end-to-end (inject a fault, show how the logs/metrics surface it)
+
+### M3.7 — Timeline & Kernel Profiling (Nsight Systems)
+> Deepens M3.3: `metrics/perf_monitor.py` gives aggregate counters (FPS / VRAM / RSS); this milestone adds the **system timeline** — per-kernel durations, GPU idle/gaps, CPU↔GPU sync stalls — to answer *where* the 7% full-graph overhead goes and whether the Python probe (CSV write + blur) stalls the pipeline (the risk flagged in `docs/system-design.md`). These are profiling artifacts, not unit-tested logic; the `nsys_run.sh` driver mirrors the un-tested `throughput_run.sh` / `stability_run.sh` pattern.
+
+**Exit criteria:** an `nsys` timeline of the full DeepStream graph with NVTX-annotated probe ranges, captured on the unthrottled file path; per-plugin latency via DeepStream's built-in measurement; findings written up against the 40 ms / 25 fps budget.
+
+- [ ] `metrics/nsys_run.sh` — bounded `nsys profile` driver mirroring `throughput_run.sh`: unthrottled 3× file source (`--no-sync --duration 20`), `--trace=cuda,nvtx,osrt,cudnn`, writes `.nsys-rep` to `metrics/results/`; live RTSP path documented as a separate (mostly GPU-idle) capture
+- [ ] NVTX instrumentation in `pipelines/multi_stream.py` — wrap `_probe` hot paths (`csv_write`, `blur_bboxes`) and `_yolo_decode_probe` (`obj_meta_inject`) in `nvtx.annotate` ranges behind a `--nvtx` flag (zero-cost when off); add `nvtx` to `docker/Dockerfile`
+- [ ] Enable + document DeepStream per-component latency — `NVDS_ENABLE_LATENCY_MEASUREMENT=1` + `NVDS_ENABLE_COMPONENT_LATENCY_MEASUREMENT=1` for per-plugin (nvinfer / nvtracker / nvdsosd) timing; the GStreamer-graph view nsys doesn't give cleanly (addresses the nvstreammux-waits-on-slowest-source note in `docs/system-design.md`)
+- [ ] Add `cap_add: [SYS_ADMIN]` to a dedicated profiling service in `docker-compose.yml` (CUDA trace works without it; CPU sampling + `--gpu-metrics-device` need it) — document the trade-off, keep the default `pipeline` service unprivileged
+- [ ] Findings writeup (README section or `metrics/stability.ipynb` cell): where the 7% overhead lands (kernels vs memcpy vs sync), whether the Python probe serialises against GPU work, GPU-idle fraction on the live path; real ms quoted against the 40 ms budget
+- [ ] **Deferrable:** Nsight Compute (`ncu`) kernel deep-dive (occupancy / memory throughput) on the YOLO26n TRT engine + `yolo26_decode` plugin — offline engine profiling, not the live pipeline; blocks nothing
 
 ---
 
