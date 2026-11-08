@@ -311,6 +311,54 @@
 
 ---
 
+## M4 — README Presentation Redesign
+
+> **Why:** the README currently leads with implementation detail (`IPluginV2DynamicExt`, `NvDsObjectMeta`, `network-type=100`, `pyds` all appear within the first ~35 lines) before any result, and has no hero visual or consolidated results summary — the strongest outcomes (29.7 FPS live × 3 streams, 1.52× FP16 speedup at ~99% accuracy retention, cross-camera MTMC fusion) are buried in the 5th of 10 sections. This milestone reorders the presentation into a **10-second recruiter → 60-second engineering manager → technical deep dive** hierarchy without discarding any existing technical depth or introducing unverified claims.
+>
+> **Dataset attribution note (do not treat as a blanket rule):** the live pipeline / throughput / stability numbers are genuinely measured against **WildTrack** Cam1–3 (README's mediamtx source), and the M3.8 cross-camera/MTMC results are WildTrack-based. But the FP16/FP32 accuracy validation and the MOTA/IDF1 tracker comparison are genuinely **MOT17-04-SDP**-based (`metrics/results/accuracy.json`, `metrics/evaluate_tracker.py`), used specifically because MOT17 has the ground-truth annotations that GT-aligned accuracy/MOTA scoring needs. This split is correct as currently documented — M4 states it explicitly rather than re-labelling everything as WildTrack.
+
+**Exit criteria:** the README's first screen (title, one-sentence value proposition, hero demo, results table) communicates what the project achieves and why it matters without requiring GStreamer/TensorRT familiarity; every benchmark claim is traceable to a repository artefact and correctly scoped to its actual evaluation source (WildTrack live/throughput/stability/cross-camera vs MOT17 GT-aligned accuracy/tracker); measured results are visually distinguished from projections; the full existing technical depth (architecture, tracker evaluation, latency-tail analysis, stability, observability, testing, quick start, roadmap) is preserved below the fold.
+
+### M4.0 — Dataset Attribution & Fact Corrections ✓
+- [x] Add a concise "Benchmark source" statement near the top of the README stating the real split — **the split first written here was wrong and was corrected during M4.2.** Git provenance: `metrics/results/stability_live.json` and `throughput_unthrottled.json` were both committed at M3.3 (`e6a5c79`, 2026-06-23), when `configs/mediamtx.yml` still served `mot17_04/13/02.mp4`; the WildTrack switch landed later in `23c06ae`, and `metrics/throughput_run.sh` still hardcodes `--uri data/mot17_04.mp4` ×3. Corrected four-way split: MOT17 over RTSP (live + stability), MOT17-04 file source (unthrottled ceiling), MOT17-04-SDP (accuracy + single-camera tracker MOTA/IDF1), WildTrack Cam1–3 (cross-camera MTMC + demo footage); the batch sweep is `trtexec` on synthetic tensors and has no dataset
+- [x] Correct the stale unit-test figure to the current count — 412 across `tests/unit/`, verified with `pytest --collect-only`; re-verify at execution time since the count will keep climbing
+- [x] Sweep README for any other numbers that drifted from `metrics/results/*.json` (test counts, FPS, latency, VRAM) and correct in place — the per-module test table had also drifted (`multi_stream` 51 → 62, missing `make_readme_demo` row); FPS/latency/VRAM figures re-checked against the JSON and were already correct
+
+### M4.1 — Hero Demo Asset ✓
+- [x] No processed recording existed — produced one from `data/c1/c2/c3_5min.mp4`. The OSD drew boxes only (`_yolo_decode_probe` never populated `text_params`/`font_params`, so `--mtmc-osd-labels` silently rendered nothing), so added `--osd-labels` + `--osd-font-size`: `format_track_label` / `configure_osd_text_params` / `osd_border_width` render `ID <tracker> | G<global>`, and `_apply_mtmc_osd_labels` reuses the same helper. Defaults unchanged, so every existing benchmark path is byte-identical. `CAM 0N` labels are burned in by ffmpeg at tile time; no FPS overlay
+- [x] **Capture path changed from the plan:** RTSP restream + ffmpeg recorders proved unusable — blur + MTMC at 3×1080p60 runs at ~5 fps/stream, so `rtspsrc` backpressure stalled the sources into EOS, and clients hit `non-existing PPS`/`dimensions not set` attaching mid-stream. Added `--record-dir` instead: a per-branch `nvvideoconvert → nvv4l2h264enc → h264parse → mp4mux → filesink` tail, plus EOS-before-teardown (`_stop()`, `_EOS_GRACE_S`) so `mp4mux` writes its moov atom. Files are frame-aligned by construction; `--record-dir` and `--restream-base-port` are mutually exclusive
+- [x] `tools/capture_demo_streams.sh` — env-configurable driver, repo-root-relative, captures to `/tmp` so raw footage can never be committed; `SOURCE_MODE=file` (default, every frame processed) or `rtsp`
+- [x] `tools/make_readme_demo.sh` — trim/scale/`drawtext`/`hstack`, two-pass palettegen→paletteuse GIF + x264 MP4; hard-fails on a missing capture, missing font, or a GIF over `MAX_MB`. 7 CPU-safe unit tests with a fake ffmpeg, mirroring `test_make_wildtrack_clips.py` (411 unit tests total)
+- [x] `docs/assets/pipeline-demo.gif` — 882×166 (3 × 294 px so GitHub renders it 1:1), 12 s @ 10 fps, 64-colour bayer-dithered, 4.5 MB, infinite-loop NETSCAPE block; `pipeline-demo.mp4` 1.4 MB at 25 fps
+- [x] **Licence: no dataset licence exists.** EPFL's WildTrack page publishes no terms of use or redistribution conditions (only the WILDTRACK *toolkit* is GPLv3). Committed a short, downscaled, anonymised excerpt with the caveat stated explicitly in `docs/assets/README.md`, including the honest limitation that blur is detector-bound — the dense far-field crowd is not blurred, and the 294 px downscale does the rest
+
+### M4.2 — Opening & Results at a Glance ✓
+- [x] Rewrite the README opening to lead with a one-sentence outcome statement before any low-level term. `IPluginV2DynamicExt` / `NvDsObjectMeta` / `network-type=100` / `pyds` lived in the "What this demonstrates" bullets, so that whole section moved below the hero block and its two offending bullets were reworded in plain language — no detail lost, since **Key design decisions** already states every removed term in full
+- [x] Insert the hero demo (`docs/assets/pipeline-demo.gif`) directly below the opening statement. The caption says explicitly that it is representative footage and **not** the benchmark run: `tools/capture_demo_streams.sh` enables `--anonymise --osd-labels --mtmc`, while the 29.7 FPS `metrics/stability_run.sh` run used none of them (and ran on MOT17, not the WildTrack footage shown)
+- [x] Add a "Results at a glance" table immediately below the hero — six rows (live FPS + VRAM + leak check, full-graph ceiling and overhead, FP16 speedup + IoU/match rate, batch/p99 stream ceiling, cross-camera IDF1 lift, test count), each with a **Source** column naming its actual evaluation setup
+- [x] Embed one benchmark chart (`metrics/results/multi_stream_throughput.png`) below the table with a plain-English caption covering all three panels and labelling it a synthetic `trtexec` sweep, so it is not read as end-to-end pipeline throughput
+
+### M4.3 — What I Built + Engineering Decisions
+- [ ] Add a ~5-bullet "What I built" section scannable by a non-technical reader (multi-stream ingestion, YOLO26n + TensorRT FP16, tracker benchmarking, custom decode plugin, production-oriented reliability/testing)
+- [ ] Convert the FP32→FP16 comparison table into an "Engineering decisions & trade-offs" narrative (decision / measured result / trade-off / practical implication) covering the ~1.52× speedup, ~99% box match / mean IoU, and explicitly noting the GTX 1660 Ti has **no Tensor Cores** so the gain is bandwidth-driven, not compute-driven (README already states this — carry it forward, don't drop it)
+- [ ] In the same section, distinguish runtime VRAM from TensorRT engine/storage size from OTA/fleet deployment footprint; retain any existing OTA fleet-size calculation but label it explicitly as a projection
+
+### M4.4 — Tracker & Cross-Camera Framing
+- [ ] Add a short product-decision summary above the existing MOT17-04 tracker table (identity continuity vs stability vs compute cost — which tracker wins on which axis), keeping the terminology already used in `configs/tracker_*.yml` (IOU / NvDCF / ByteTrack-inspired NvSORT) and the existing detector-recall caveat on absolute MOTA
+- [ ] Keep the existing WildTrack cross-camera/MTMC table (pooled IDF1, cross-camera P/R/F1, ground-plane MODA/MODP) clearly separated from the single-camera tracker story, explicitly labelled as WildTrack-evaluated
+- [ ] Label any fleet/camera-count extrapolation (e.g. 5,000-camera sizing) as a "Capacity projection" wherever it appears in prose, distinct from measured 15-stream/batch figures, with the arithmetic double-checked
+
+### M4.5 — Architecture Intro + Reproducibility
+- [ ] Add a one-paragraph plain-English description before the existing GStreamer/architecture diagram (three sources decoded → batched for GPU inference → tracked → demuxed to independent output streams with anonymisation and metadata logging)
+- [ ] Add a reproducibility statement linking to the backing artefacts (`metrics/benchmark_engines.sh`, `metrics/batch_bench.sh`, `metrics/stability_run.sh`, `metrics/throughput_run.sh`, `metrics/decode_comparison.ipynb`, `metrics/tracker_comparison.ipynb`, `metrics/stability.ipynb`, `metrics/mtmc_comparison.ipynb`, `metrics/results/*.json`)
+- [ ] Reorder the remaining existing sections (quick start, tests, roadmap, known gaps, privacy) into the recruiter → engineering-manager → deep-dive hierarchy without deleting or shortening existing technical content
+
+### M4.6 — Final Review
+- [ ] Re-read the rendered README end-to-end: confirm the first screen explains the project in ~10 seconds, no dataset attribution is misrepresented, no fabricated live overlay was introduced, measured and projected figures are visually distinct, and all relative links/image paths resolve
+- [ ] Confirm generated GIF/MP4 file sizes are reasonable for a GitHub README and are not committed alongside the large raw source videos in `data/`
+
+---
+
 ## Stretch Goals (post M3)
 
 - [ ] Grafana dashboard wired to CSV/InfluxDB output
